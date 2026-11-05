@@ -57,6 +57,8 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import android.hardware.camera2.CameraCharacteristics
 import kotlin.math.atan
+import kotlin.math.ln
+import kotlin.math.pow
 import kotlin.math.roundToInt
 import kotlin.math.tan
 import androidx.core.view.updatePadding
@@ -64,6 +66,8 @@ import com.backdropcam.databinding.ActivityMainBinding
 import com.backdropcam.databinding.SheetMicBinding
 import com.backdropcam.databinding.SheetResultBinding
 import com.backdropcam.databinding.SheetSettingsBinding
+import com.backdropcam.databinding.SheetScriptsBinding
+import com.backdropcam.databinding.DialogScriptBinding
 import com.google.android.gms.auth.api.identity.AuthorizationRequest
 import com.google.android.gms.auth.api.identity.Identity
 import com.google.android.gms.common.api.Scope
@@ -98,6 +102,17 @@ class MainActivity : AppCompatActivity() {
     private var noWideToastShown = false
     private var cropX = 1f
     private var cropY = 1f
+    private var boundWide43 = false
+    private var adjustOpen = false
+    private var lastFraming: CompositeEngine.Framing? = null
+    private var backdropMean: FloatArray? = null
+
+    // Teleprompter
+    private lateinit var scripts: ScriptStore
+    private var teleRunning = false
+    private var teleAccum = 0f
+    private var teleLastMs = 0L
+    private var refreshScriptList: (() -> Unit)? = null
 
     // Hands-free mode
     private lateinit var speaker: Speaker
@@ -120,6 +135,18 @@ class MainActivity : AppCompatActivity() {
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
             if (grants[Manifest.permission.CAMERA] == true) bindCamera()
             else toast("BackdropCam needs the camera to work")
+        }
+
+    private val importScript =
+        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            if (uri != null) io.execute {
+                try {
+                    val (title, body) = scripts.import(uri)
+                    main.post { editScript(null, title, body) }
+                } catch (e: Exception) {
+                    main.post { toast("Could not read that file: ${e.message}") }
+                }
+            }
         }
 
     private val pickBackdrop =
@@ -156,6 +183,7 @@ class MainActivity : AppCompatActivity() {
         voice = VoiceCommands(this) { onVoiceStart() }
         engine.framingWanted = settings.handsFree
         engine.onFraming = { f ->
+            lastFraming = f
             if (settings.handsFree && recorder == null && countdown == null && !speaker.isSpeaking) coach.update(f)
         }
         applyEngineOptions()
@@ -193,7 +221,12 @@ class MainActivity : AppCompatActivity() {
         ui.handsBtn.setOnClickListener { setHandsFree(!settings.handsFree, announce = true) }
         ui.timerBtn.setOnClickListener { cycleTimer() }
         ui.qualityChip.setOnClickListener { cycleQuality() }
-        ui.aspectChip.setOnClickListener { toggleFullScreen() }
+        ui.aspectChip.setOnClickListener { cycleViewMode() }
+        ui.tuneBtn.setOnClickListener { setAdjustOpen(!adjustOpen) }
+        ui.teleBtn.setOnClickListener { showScriptsSheet() }
+        ui.teleBox.setOnClickListener { teleRunning = !teleRunning }
+        ui.teleText.setOnClickListener { teleRunning = !teleRunning }
+        setupAdjustPanel()
         ui.pauseBtn.setOnClickListener { togglePause() }
         ui.flipBtn.setOnClickListener { flipCamera() }
         ui.recordBtn.setOnClickListener { onRecordPressed() }
@@ -202,7 +235,11 @@ class MainActivity : AppCompatActivity() {
         updateMicIcon()
         updateTimerUi()
         updateHandsFreeUi()
-        ui.aspectChip.text = if (settings.fullScreen) "FULL" else "16:9"
+        ui.aspectChip.text = viewModeLabel()
+        scripts = ScriptStore(this)
+        updateTeleUi()
+        main.post(teleTick)
+        handleShareIntent(intent)
         buildBackdropStrip()
         applyBackdropSelection()
         lastVideo?.let { loadThumbInto(it, ui.lastThumb) }
@@ -251,6 +288,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        main.removeCallbacks(teleTick)
         voice.stop()
         speaker.shutdown()
         engine.release()
@@ -297,7 +335,7 @@ class MainActivity : AppCompatActivity() {
                 return@addListener
             }
             val p = Preview.Builder()
-                .setResolutionSelector(highestResolutionSelector(settings.qualityCap))
+                .setResolutionSelector(highestResolutionSelector(settings.qualityCap, settings.viewMode == "43"))
                 .setTargetRotation(Surface.ROTATION_0)
                 .build()
             p.setSurfaceProvider(engine.surfaceProvider(front, info.sensorRotationDegrees))
@@ -309,18 +347,24 @@ class MainActivity : AppCompatActivity() {
                 return@addListener
             }
             torchOn = false
+            boundWide43 = settings.viewMode == "43"
             setupCameraControls()
+            updateTeleUi()
         }, ContextCompat.getMainExecutor(this))
     }
 
     /** The largest 16:9 camera mode (up to [cap] on the long side) the video encoder can also record. */
-    private fun highestResolutionSelector(cap: Int): ResolutionSelector =
-        ResolutionSelector.Builder()
-            .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
+    private fun highestResolutionSelector(cap: Int, fourByThree: Boolean): ResolutionSelector {
+        val ratio = if (fourByThree) 4f / 3f else 16f / 9f
+        return ResolutionSelector.Builder()
+            .setAspectRatioStrategy(
+                if (fourByThree) AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY
+                else AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY
+            )
             .setResolutionFilter { sizes, _ ->
                 val good = sizes
                     .filter { max(it.width, it.height) <= cap }
-                    .filter { abs(it.width.toFloat() / it.height - 16f / 9f) < 0.02f || abs(it.height.toFloat() / it.width - 16f / 9f) < 0.02f }
+                    .filter { abs(it.width.toFloat() / it.height - ratio) < 0.02f || abs(it.height.toFloat() / it.width - ratio) < 0.02f }
                     .filter { VideoRecorder.isSizeSupported(it.width, it.height) }
                     .sortedByDescending { it.width * it.height }
                 good.ifEmpty { sizes.filter { max(it.width, it.height) <= cap }.sortedByDescending { it.width * it.height } }
@@ -328,6 +372,7 @@ class MainActivity : AppCompatActivity() {
             }
             .setResolutionStrategy(ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY)
             .build()
+    }
 
     private fun onCameraGeometry(w: Int, h: Int) {
         applyCrop()
@@ -456,20 +501,125 @@ class MainActivity : AppCompatActivity() {
         }
         engine.setCrop(cropX, cropY)
         ui.surface.layoutParams = lp
-        ui.aspectChip.text = if (settings.fullScreen) "FULL" else "16:9"
+        ui.aspectChip.text = viewModeLabel()
     }
 
-    private fun toggleFullScreen() {
+    private fun viewModeLabel() = when (settings.viewMode) {
+        "169" -> "16:9"
+        "43" -> "4:3"
+        else -> "FULL"
+    }
+
+    /** FULL (fills the screen) -> 16:9 -> 4:3 (widest the lens can see). */
+    private fun cycleViewMode() {
         if (busy()) return
-        settings.fullScreen = !settings.fullScreen
-        applyCrop()
-        toast(if (settings.fullScreen) "Full screen: video matches your screen shape" else "16:9: standard video shape")
+        settings.viewMode = when (settings.viewMode) {
+            "full" -> "169"
+            "169" -> "43"
+            else -> "full"
+        }
+        ui.aspectChip.text = viewModeLabel()
+        if ((settings.viewMode == "43") != boundWide43) bindCamera() else applyCrop()
+        toast(
+            when (settings.viewMode) {
+                "169" -> "16:9: standard video shape"
+                "43" -> "4:3: the widest view this lens can see"
+                else -> "Full screen: video matches your screen shape"
+            }
+        )
+    }
+
+    // ================================================================== adjust panel (size, position, light)
+
+    private fun setupAdjustPanel() {
+        ui.sizeAdjust.value = (settings.personScale * 100f).coerceIn(50f, 100f)
+        ui.brightAdjust.value = settings.brightness.coerceIn(-1f, 1f)
+        ui.warmAdjust.value = settings.warmth.coerceIn(-1f, 1f)
+        ui.sizeAdjust.addOnChangeListener { _, v, fromUser ->
+            if (fromUser) { settings.personScale = v / 100f; applyPersonAndColor() }
+        }
+        ui.brightAdjust.addOnChangeListener { _, v, fromUser ->
+            if (fromUser) { settings.brightness = v; applyPersonAndColor() }
+        }
+        ui.warmAdjust.addOnChangeListener { _, v, fromUser ->
+            if (fromUser) { settings.warmth = v; applyPersonAndColor() }
+        }
+        ui.autoMatchBtn.setOnClickListener { autoMatchLight() }
+        ui.resetAdjustBtn.setOnClickListener {
+            settings.personScale = 0.85f; settings.personOffX = 0f; settings.personOffY = 0f
+            settings.brightness = 0f; settings.warmth = 0f
+            syncAdjustSliders()
+            applyPersonAndColor()
+        }
+        ui.doneAdjustBtn.setOnClickListener { setAdjustOpen(false) }
+        applyPersonAndColor()
+    }
+
+    private fun syncAdjustSliders() {
+        ui.sizeAdjust.value = (settings.personScale * 100f).coerceIn(50f, 100f)
+        ui.brightAdjust.value = settings.brightness.coerceIn(-1f, 1f)
+        ui.warmAdjust.value = settings.warmth.coerceIn(-1f, 1f)
+    }
+
+    private fun applyPersonAndColor() {
+        engine.setPersonTransform(settings.personScale, settings.personOffX, settings.personOffY)
+        engine.setColorAdjust(2f.pow(settings.brightness), settings.warmth)
+    }
+
+    private fun setAdjustOpen(open: Boolean) {
+        adjustOpen = open
+        ui.adjustPanel.visibility = if (open) View.VISIBLE else View.GONE
+        ui.tuneBtn.setColorFilter(if (open) 0xFFFFD54F.toInt() else 0xFFFFFFFF.toInt())
+        if (open && settings.backdrop == KEY_NONE) toast("Pick a backdrop or Blur to resize yourself")
+    }
+
+    /** Moves the person by a drag on the screen (fractions of the screen, y down). */
+    private fun movePerson(dxScreen: Float, dyScreen: Float) {
+        val nx = dxScreen
+        val ny = -dyScreen
+        // Screen axes -> world axes (the picture is turned when the phone is sideways).
+        val (wx, wy) = when (deviceRotation) {
+            90 -> ny to -nx
+            180 -> -nx to -ny
+            270 -> -ny to nx
+            else -> nx to ny
+        }
+        settings.personOffX = (settings.personOffX + wx).coerceIn(-0.5f, 0.5f)
+        settings.personOffY = (settings.personOffY + wy).coerceIn(-0.5f, 0.5f)
+        applyPersonAndColor()
+    }
+
+    /** Sets brightness and warmth so you match the backdrop's light. */
+    private fun autoMatchLight() {
+        val bg = backdropMean
+        val f = lastFraming
+        if (bg == null || settings.backdrop == KEY_NONE || settings.backdrop == KEY_BLUR) {
+            return toast("Choose a backdrop image first")
+        }
+        if (f == null || f.coverage < 0.02f) return toast("Step into the frame first")
+        fun lum(r: Float, g: Float, b: Float) = 0.299f * r + 0.587f * g + 0.114f * b
+        val lp = lum(f.meanR, f.meanG, f.meanB).coerceAtLeast(0.02f)
+        val lb = lum(bg[0], bg[1], bg[2]).coerceAtLeast(0.02f)
+        val gainValue = (lb / lp).pow(0.6f).coerceIn(0.6f, 1.7f)
+        val tp = (f.meanR - f.meanB) / (lp + 0.05f)
+        val tb = (bg[0] - bg[2]) / (lb + 0.05f)
+        settings.brightness = (ln(gainValue) / ln(2f)).coerceIn(-1f, 1f)
+        settings.warmth = ((tb - tp) * 3f).coerceIn(-1f, 1f)
+        syncAdjustSliders()
+        applyPersonAndColor()
+        toast("Matched to the backdrop. Fine-tune with the sliders.")
     }
 
     @SuppressLint("ClickableViewAccessibility")
     private fun setupGestures() {
         val scale = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
             override fun onScale(d: ScaleGestureDetector): Boolean {
+                if (adjustOpen) {
+                    settings.personScale = (settings.personScale * d.scaleFactor).coerceIn(0.5f, 1f)
+                    ui.sizeAdjust.value = settings.personScale * 100f
+                    applyPersonAndColor()
+                    return true
+                }
                 val cam = camera ?: return false
                 val cur = cam.cameraInfo.zoomState.value?.zoomRatio ?: 1f
                 cam.cameraControl.setZoomRatio(cur * d.scaleFactor)
@@ -479,6 +629,12 @@ class MainActivity : AppCompatActivity() {
         val tap = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
             override fun onSingleTapUp(e: MotionEvent): Boolean {
                 focusAt(e.x / ui.surface.width, e.y / ui.surface.height)
+                return true
+            }
+
+            override fun onScroll(e1: MotionEvent?, e2: MotionEvent, distanceX: Float, distanceY: Float): Boolean {
+                if (!adjustOpen || e2.pointerCount > 1) return false
+                movePerson(-distanceX / ui.surface.width, -distanceY / ui.surface.height)
                 return true
             }
         })
@@ -631,7 +787,10 @@ class MainActivity : AppCompatActivity() {
             KEY_BLUR -> engine.setMode(CompositeEngine.MODE_BLUR)
             else -> io.execute {
                 val bmp = backdrops.load(key)
-                if (bmp != null) engine.setBackdrop(bmp)
+                if (bmp != null) {
+                    backdropMean = meanColor(bmp)
+                    engine.setBackdrop(bmp)
+                }
                 else main.post {
                     settings.backdrop = KEY_BLUR
                     applyBackdropSelection()
@@ -747,6 +906,10 @@ class MainActivity : AppCompatActivity() {
         recordStartMs = System.currentTimeMillis()
         setShutter(true)
         ui.recPill.visibility = View.VISIBLE
+        if (ui.teleBox.visibility == View.VISIBLE) {
+            ui.teleScroll.scrollTo(0, 0)
+            teleRunning = true
+        }
         ui.levelBar.visibility = if (audio) View.VISIBLE else View.GONE
         ui.flipBtn.visibility = View.GONE
         ui.pauseBtn.visibility = View.VISIBLE
@@ -758,10 +921,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun tickTimer() {
         val rec = recorder ?: return
-        val s = rec.ptsNs() / 1_000_000_000L
-        val t = String.format("%02d:%02d", s / 60, s % 60)
-        ui.recTime.text = if (rec.paused) "$t  Paused" else t
-        main.postDelayed({ tickTimer() }, 500)
+        tickTimerOnce()
+        val limit = settings.autoStop
+        if (limit > 0 && rec.ptsNs() / 1_000_000_000L >= limit) {
+            stopRecording()
+            return
+        }
+        main.postDelayed({ tickTimer() }, 250)
     }
 
     private fun stopRecording() {
@@ -771,6 +937,7 @@ class MainActivity : AppCompatActivity() {
         ui.recPill.visibility = View.GONE
         ui.recPill.alpha = 1f
         ui.pauseBtn.visibility = View.GONE
+        teleRunning = false
         ui.flipBtn.visibility = View.VISIBLE
         setControlsEnabled(true)
         updateMicIcon()
@@ -811,10 +978,12 @@ class MainActivity : AppCompatActivity() {
         val rec = recorder ?: return
         if (rec.paused) {
             rec.resume()
+            if (ui.teleBox.visibility == View.VISIBLE) teleRunning = true
             ui.pauseBtn.setImageResource(R.drawable.ic_pause)
             ui.recPill.alpha = 1f
         } else {
             rec.pause()
+            teleRunning = false
             ui.pauseBtn.setImageResource(R.drawable.ic_play_arrow)
             ui.recPill.alpha = 0.7f
         }
@@ -824,7 +993,9 @@ class MainActivity : AppCompatActivity() {
     private fun tickTimerOnce() {
         val rec = recorder ?: return
         val s = rec.ptsNs() / 1_000_000_000L
-        val t = String.format("%02d:%02d", s / 60, s % 60)
+        var t = String.format("%02d:%02d", s / 60, s % 60)
+        val limit = settings.autoStop
+        if (limit > 0) t += String.format(" / %02d:%02d", limit / 60, limit % 60)
         ui.recTime.text = if (rec.paused) "$t  Paused" else t
     }
 
@@ -965,6 +1136,11 @@ class MainActivity : AppCompatActivity() {
         }
         b.handsFreeSwitch.isChecked = settings.handsFree
         b.handsFreeSwitch.setOnCheckedChangeListener { _, on -> setHandsFree(on, announce = true) }
+        val stopIds = mapOf(0 to R.id.as0, 30 to R.id.as30, 60 to R.id.as60, 90 to R.id.as90, 120 to R.id.as120, 150 to R.id.as150, 180 to R.id.as180)
+        b.autoStopGroup.check(stopIds[settings.autoStop] ?: R.id.as0)
+        b.autoStopGroup.setOnCheckedStateChangeListener { _, ids ->
+            settings.autoStop = stopIds.entries.firstOrNull { it.value == ids.firstOrNull() }?.key ?: 0
+        }
         b.autoUploadSwitch.isChecked = settings.autoUpload
         b.autoUploadSwitch.setOnCheckedChangeListener { _, on -> settings.autoUpload = on }
         dlg.show()
@@ -1131,7 +1307,149 @@ class MainActivity : AppCompatActivity() {
         speaker.say("Okay. Recording in") { if (recorder == null && countdown == null) startCountdown(3) }
     }
 
+    // ================================================================== teleprompter
+
+    private val teleTick = object : Runnable {
+        override fun run() {
+            val now = System.currentTimeMillis()
+            val dt = if (teleLastMs == 0L) 0f else (now - teleLastMs) / 1000f
+            teleLastMs = now
+            if (teleRunning && ui.teleBox.visibility == View.VISIBLE) {
+                teleAccum += settings.teleSpeed * dp(9) * dt
+                val step = teleAccum.toInt()
+                if (step > 0) {
+                    ui.teleScroll.scrollBy(0, step)
+                    teleAccum -= step
+                }
+            }
+            main.postDelayed(this, 16)
+        }
+    }
+
+    private fun updateTeleUi() {
+        val front = settings.frontCamera
+        ui.teleBtn.visibility = if (front) View.VISIBLE else View.GONE
+        val script = settings.teleScript?.let { scripts.load(it) }
+        val show = front && settings.teleOn && script != null && script.body.isNotBlank()
+        ui.teleBox.visibility = if (show) View.VISIBLE else View.GONE
+        if (!show) teleRunning = false
+        if (script != null) ui.teleText.text = script.body
+        ui.teleText.textSize = settings.teleSize.toFloat()
+    }
+
+    private fun showScriptsSheet() {
+        val b = SheetScriptsBinding.inflate(layoutInflater)
+        val dlg = BottomSheetDialog(this)
+        dlg.setContentView(b.root)
+        b.teleSwitch.isChecked = settings.teleOn
+        b.teleSwitch.setOnCheckedChangeListener { _, on -> settings.teleOn = on; updateTeleUi() }
+        b.speedSlider.value = settings.teleSpeed.coerceIn(1, 10).toFloat()
+        b.speedSlider.addOnChangeListener { _, v, _ -> settings.teleSpeed = v.toInt() }
+        b.sizeSlider.value = (settings.teleSize.coerceIn(18, 48) / 2 * 2).toFloat()
+        b.sizeSlider.addOnChangeListener { _, v, _ -> settings.teleSize = v.toInt(); updateTeleUi() }
+        b.newScriptBtn.setOnClickListener { editScript(null, "", "") }
+        b.importScriptBtn.setOnClickListener {
+            importScript.launch(
+                arrayOf("text/plain", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+            )
+        }
+        val refresh = {
+            b.scriptList.removeAllViews()
+            val list = scripts.list()
+            if (list.isEmpty()) {
+                b.scriptList.addView(TextView(this).apply {
+                    text = "No scripts yet. Tap New script or Import."
+                    setTextColor(0xB3FFFFFF.toInt())
+                    setPadding(0, dp(8), 0, dp(8))
+                })
+            }
+            for (sc in list) {
+                val active = sc.id == settings.teleScript
+                b.scriptList.addView(TextView(this).apply {
+                    text = (if (active) "✓  " else "") + sc.title
+                    textSize = 16f
+                    setTextColor(if (active) 0xFFFFD54F.toInt() else 0xFFFFFFFF.toInt())
+                    setPadding(0, dp(12), 0, dp(12))
+                    setOnClickListener {
+                        settings.teleScript = sc.id
+                        settings.teleOn = true
+                        b.teleSwitch.isChecked = true
+                        updateTeleUi()
+                        refreshScriptList?.invoke()
+                    }
+                    setOnLongClickListener {
+                        MaterialAlertDialogBuilder(this@MainActivity)
+                            .setTitle(sc.title)
+                            .setItems(arrayOf("Edit", "Delete")) { _, which ->
+                                if (which == 0) editScript(sc.id, sc.title, sc.body)
+                                else {
+                                    scripts.delete(sc.id)
+                                    if (settings.teleScript == sc.id) settings.teleScript = null
+                                    updateTeleUi()
+                                    refreshScriptList?.invoke()
+                                }
+                            }
+                            .show()
+                        true
+                    }
+                })
+            }
+        }
+        refreshScriptList = refresh
+        refresh()
+        dlg.setOnDismissListener { if (refreshScriptList === refresh) refreshScriptList = null }
+        dlg.show()
+    }
+
+    /** Opens the script editor; saving makes it the active teleprompter script. */
+    private fun editScript(id: String?, title: String, body: String) {
+        val b = DialogScriptBinding.inflate(layoutInflater)
+        b.scriptTitle.setText(title)
+        b.scriptBody.setText(body)
+        MaterialAlertDialogBuilder(this)
+            .setTitle(if (id == null) "New script" else "Edit script")
+            .setView(b.root)
+            .setPositiveButton("Save") { _, _ ->
+                val newId = scripts.save(id, b.scriptTitle.text.toString(), b.scriptBody.text.toString())
+                settings.teleScript = newId
+                settings.teleOn = true
+                updateTeleUi()
+                refreshScriptList?.invoke()
+                if (!settings.frontCamera) toast("Script saved. Switch to the front camera to use the teleprompter.")
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleShareIntent(intent)
+    }
+
+    /** Text shared from Google Docs, Notes, WhatsApp... becomes a new teleprompter script. */
+    private fun handleShareIntent(intent: Intent?) {
+        if (intent?.action != Intent.ACTION_SEND) return
+        val text = intent.getStringExtra(Intent.EXTRA_TEXT) ?: return
+        val title = intent.getStringExtra(Intent.EXTRA_SUBJECT) ?: "Shared script"
+        intent.action = null
+        editScript(null, title, text)
+    }
+
     // ================================================================== helpers
+
+    private fun meanColor(bmp: Bitmap): FloatArray {
+        val small = Bitmap.createScaledBitmap(bmp, 32, 32, true)
+        val px = IntArray(32 * 32)
+        small.getPixels(px, 0, 32, 0, 0, 32, 32)
+        if (small !== bmp) small.recycle()
+        var r = 0f; var g = 0f; var b = 0f
+        for (c in px) {
+            r += ((c shr 16) and 0xFF) / 255f
+            g += ((c shr 8) and 0xFF) / 255f
+            b += (c and 0xFF) / 255f
+        }
+        return floatArrayOf(r / px.size, g / px.size, b / px.size)
+    }
 
     /** Keeps icons upright when the phone is turned, like the built-in camera app. */
     private fun rotateControls(rotation: Int) {
@@ -1142,7 +1460,7 @@ class MainActivity : AppCompatActivity() {
             else -> 0f
         }
         val views = mutableListOf<View>(
-            ui.settingsBtn, ui.flashBtn, ui.timerBox, ui.handsBtn, ui.aspectChip, ui.qualityChip, ui.micBtn, ui.pauseBtn,
+            ui.settingsBtn, ui.flashBtn, ui.timerBox, ui.handsBtn, ui.aspectChip, ui.qualityChip, ui.micBtn, ui.pauseBtn, ui.tuneBtn, ui.teleBtn,
             ui.flipBtn, ui.lastThumb, ui.countdownText, ui.recPill
         )
         for (i in 0 until ui.zoomRow.childCount) views += ui.zoomRow.getChildAt(i)

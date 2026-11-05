@@ -120,6 +120,13 @@ class CompositeEngine(context: Context) {
     private var maskReady = false
     private var maskGen = 0
 
+    // Person layer: size (1 = as filmed), offset in world units, colour adjustment.
+    private var personScale = 1f
+    private var personOffX = 0f
+    private var personOffY = 0f
+    private var gain = 1f
+    private var warmth = 0f
+
     /** Set true to keep segmenting (for framing guidance) even with no background effect. */
     @Volatile var framingWanted = false
 
@@ -140,6 +147,10 @@ class CompositeEngine(context: Context) {
         val bottom: Float,
         val mirrored: Boolean,
         val landscape: Boolean,
+        /** Average colour of the person (0..1), for brightness matching. */
+        val meanR: Float = 0f,
+        val meanG: Float = 0f,
+        val meanB: Float = 0f,
     )
 
     /** Maps preview (screen) uv to camera buffer uv. Used for tap-to-focus. */
@@ -211,6 +222,26 @@ class CompositeEngine(context: Context) {
                 deviceRotation = degrees
                 invalidateMask()
             }
+        }
+    }
+
+    /**
+     * Draws the person smaller ([scale] < 1) on top of the backdrop, standing on the bottom edge,
+     * moved by ([offX], [offY]) in fractions of the frame (y up).
+     */
+    fun setPersonTransform(scale: Float, offX: Float, offY: Float) {
+        handler.post {
+            personScale = scale.coerceIn(0.3f, 1f)
+            personOffX = offX.coerceIn(-0.5f, 0.5f)
+            personOffY = offY.coerceIn(-0.5f, 0.5f)
+        }
+    }
+
+    /** [gainValue] multiplies the person's brightness; [warmthValue] -1 (cooler) .. 1 (warmer). */
+    fun setColorAdjust(gainValue: Float, warmthValue: Float) {
+        handler.post {
+            gain = gainValue.coerceIn(0.3f, 3f)
+            warmth = warmthValue.coerceIn(-1f, 1f)
         }
     }
 
@@ -428,7 +459,7 @@ class CompositeEngine(context: Context) {
                     val result = segmenter?.segment(frame)
                     if (result != null) {
                         handler.post { if (gen == maskGen) uploadMask(result) }
-                        reportFraming(result, mirroredView, landscape)
+                        reportFraming(result, frame, mirroredView, landscape)
                     }
                 } catch (t: Throwable) {
                     Log.e(TAG, "segmentation failed", t)
@@ -441,13 +472,17 @@ class CompositeEngine(context: Context) {
     }
 
     /** Runs on the segmentation thread. */
-    private fun reportFraming(mask: PersonSegmenter.Mask, mirrored: Boolean, landscape: Boolean) {
+    private fun reportFraming(mask: PersonSegmenter.Mask, frame: Bitmap, mirrored: Boolean, landscape: Boolean) {
         val cb = onFraming ?: return
         val now = System.currentTimeMillis()
         if (now - lastFramingMs < 150) return
         lastFramingMs = now
         val w = mask.width
         val h = mask.height
+        val pixels = if (frame.width == w && frame.height == h) IntArray(w * h).also {
+            frame.getPixels(it, 0, w, 0, 0, w, h)
+        } else null
+        var sr = 0L; var sg = 0L; var sb = 0L
         var count = 0
         var sumX = 0L
         var minX = w; var maxX = -1; var minY = h; var maxY = -1
@@ -459,6 +494,10 @@ class CompositeEngine(context: Context) {
                 if ((mask.data[row + x].toInt() and 0xFF) > 140) {
                     count++
                     sumX += x
+                    if (pixels != null) {
+                        val c = pixels[row + x]
+                        sr += (c shr 16) and 0xFF; sg += (c shr 8) and 0xFF; sb += c and 0xFF
+                    }
                     if (x < minX) minX = x
                     if (x > maxX) maxX = x
                     if (y < minY) minY = y
@@ -475,7 +514,8 @@ class CompositeEngine(context: Context) {
             Framing(
                 count.toFloat() / total, sumX.toFloat() / count / w,
                 minX.toFloat() / w, maxX.toFloat() / w, minY.toFloat() / h, maxY.toFloat() / h,
-                mirrored, landscape
+                mirrored, landscape,
+                sr / (255f * count), sg / (255f * count), sb / (255f * count)
             )
         }
         ContextCompat.getMainExecutor(appContext).execute { cb(f) }
@@ -534,6 +574,11 @@ class CompositeEngine(context: Context) {
         val (ww, wh) = worldSize()
         val (cx, cy) = cropW()
         GLES30.glUniform2f(loc("uCrop"), cx, cy)
+        GLES30.glUniform1f(loc("uPersonScale"), personScale)
+        GLES30.glUniform2f(loc("uPersonAnchor"), 0.5f, 0.5f - cy / 2f)
+        GLES30.glUniform2f(loc("uPersonOffset"), personOffX * cx, personOffY * cy)
+        GLES30.glUniform1f(loc("uGain"), gain)
+        GLES30.glUniform1f(loc("uWarm"), warmth)
         val worldAspect = if (wh > 0) ww.toFloat() * cx / (wh * cy) else 1f
         var sx = 1f; var sy = 1f
         if (bgAspect > worldAspect) sx = worldAspect / bgAspect else sy = bgAspect / worldAspect
@@ -702,14 +747,31 @@ uniform vec2 uEdge;
 uniform vec2 uTexel;
 uniform vec2 uBgScale;
 uniform vec2 uCrop;
+uniform float uPersonScale;
+uniform vec2 uPersonAnchor;
+uniform vec2 uPersonOffset;
+uniform float uGain;
+uniform float uWarm;
 out vec4 outColor;
 
 vec3 camAt(vec2 w) { return texture(uCam, (uCamFromW * vec4(w, 0.0, 1.0)).xy).rgb; }
 vec2 img(vec2 w) { return vec2(w.x, 1.0 - w.y); }
 
+vec3 adjust(vec3 c) {
+    c *= uGain;
+    c.r *= 1.0 + 0.12 * uWarm;
+    c.b *= 1.0 - 0.12 * uWarm;
+    return clamp(c, 0.0, 1.0);
+}
+
 void main() {
-    vec3 cam = camAt(vW);
-    if (uMode > 2.5 || uMode < 0.5) { outColor = vec4(cam, 1.0); return; }
+    if (uMode > 2.5) { outColor = vec4(camAt(vW), 1.0); return; }
+    if (uMode < 0.5) { outColor = vec4(adjust(camAt(vW)), 1.0); return; }
+
+    // Where this output pixel falls in the (possibly shrunk and moved) person layer.
+    vec2 p = (vW - uPersonAnchor - uPersonOffset) / uPersonScale + uPersonAnchor;
+    vec3 cam = camAt(p);
+    float inside = step(0.0, p.x) * step(p.x, 1.0) * step(0.0, p.y) * step(p.y, 1.0);
 
     float m = 1.0;
     if (uHasMask > 0.5) {
@@ -719,7 +781,7 @@ void main() {
             float ws = 0.0;
             for (int i = -1; i <= 1; i++) {
                 for (int j = -1; j <= 1; j++) {
-                    vec2 w = vW + vec2(float(i), float(j)) * uTexel * 1.5;
+                    vec2 w = p + vec2(float(i), float(j)) * uTexel * 1.5;
                     vec3 d = camAt(w) - cam;
                     float wt = exp(-dot(d, d) * 30.0);
                     s += texture(uMask, img(w)).r * wt;
@@ -728,10 +790,10 @@ void main() {
             }
             m = s / ws;
         } else {
-            m = texture(uMask, img(vW)).r;
+            m = texture(uMask, img(p)).r;
         }
     }
-    m = smoothstep(uEdge.x, uEdge.y, m);
+    m = smoothstep(uEdge.x, uEdge.y, m) * inside;
 
     vec3 bg;
     if (uMode < 1.5) {
@@ -747,7 +809,7 @@ void main() {
         vec2 visible = (vW - 0.5) / uCrop + 0.5; // backdrop fills the visible (cropped) area
         bg = texture(uBg, (img(visible) - 0.5) * uBgScale + 0.5).rgb;
     }
-    outColor = vec4(mix(bg, cam, m), 1.0);
+    outColor = vec4(mix(bg, adjust(cam), m), 1.0);
 }
 """
     }

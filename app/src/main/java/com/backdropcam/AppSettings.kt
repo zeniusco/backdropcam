@@ -64,10 +64,55 @@ class AppSettings(context: Context) {
         get() = p.getBoolean("wideStart", true)
         set(v) = p.edit().putBoolean("wideStart", v).apply()
 
-    /** Fill the whole (tall) screen; the video is cropped to the screen's shape. */
-    var fullScreen: Boolean
-        get() = p.getBoolean("fullScreen", true)
-        set(v) = p.edit().putBoolean("fullScreen", v).apply()
+    /** "full" (fill the tall screen), "169" (standard) or "43" (widest view the lens gives). */
+    var viewMode: String
+        get() = p.getString("viewMode", "full")!!
+        set(v) = p.edit().putString("viewMode", v).apply()
+
+    val fullScreen: Boolean get() = viewMode == "full"
+
+    /** Person size, 0.5..1 */
+    var personScale: Float
+        get() = p.getFloat("personScale", 0.85f)
+        set(v) = p.edit().putFloat("personScale", v).apply()
+
+    var personOffX: Float
+        get() = p.getFloat("personOffX", 0f)
+        set(v) = p.edit().putFloat("personOffX", v).apply()
+
+    var personOffY: Float
+        get() = p.getFloat("personOffY", 0f)
+        set(v) = p.edit().putFloat("personOffY", v).apply()
+
+    /** -1..1 (0 = unchanged) */
+    var brightness: Float
+        get() = p.getFloat("brightness", 0f)
+        set(v) = p.edit().putFloat("brightness", v).apply()
+
+    var warmth: Float
+        get() = p.getFloat("warmth", 0f)
+        set(v) = p.edit().putFloat("warmth", v).apply()
+
+    /** Seconds, 0 = off */
+    var autoStop: Int
+        get() = p.getInt("autoStop", 0)
+        set(v) = p.edit().putInt("autoStop", v).apply()
+
+    var teleOn: Boolean
+        get() = p.getBoolean("teleOn", true)
+        set(v) = p.edit().putBoolean("teleOn", v).apply()
+
+    var teleSpeed: Int
+        get() = p.getInt("teleSpeed", 4)
+        set(v) = p.edit().putInt("teleSpeed", v).apply()
+
+    var teleSize: Int
+        get() = p.getInt("teleSize", 28)
+        set(v) = p.edit().putInt("teleSize", v).apply()
+
+    var teleScript: String?
+        get() = p.getString("teleScript", null)
+        set(v) = p.edit().putString("teleScript", v).apply()
 
     val qualityCap: Int
         get() = when (quality) {

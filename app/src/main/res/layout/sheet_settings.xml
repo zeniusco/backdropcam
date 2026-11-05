@@ -43,6 +43,24 @@
                 android:text="720p" />
         </com.google.android.material.chip.ChipGroup>
 
+        <TextView style="@style/SheetLabel" android:text="Auto-stop recording after" />
+
+        <com.google.android.material.chip.ChipGroup
+            android:id="@+id/autoStopGroup"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            app:selectionRequired="true"
+            app:singleSelection="true">
+
+            <com.google.android.material.chip.Chip android:id="@+id/as0" style="@style/Widget.Material3.Chip.Filter" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Off" />
+            <com.google.android.material.chip.Chip android:id="@+id/as30" style="@style/Widget.Material3.Chip.Filter" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="30s" />
+            <com.google.android.material.chip.Chip android:id="@+id/as60" style="@style/Widget.Material3.Chip.Filter" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="60s" />
+            <com.google.android.material.chip.Chip android:id="@+id/as90" style="@style/Widget.Material3.Chip.Filter" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="90s" />
+            <com.google.android.material.chip.Chip android:id="@+id/as120" style="@style/Widget.Material3.Chip.Filter" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="120s" />
+            <com.google.android.material.chip.Chip android:id="@+id/as150" style="@style/Widget.Material3.Chip.Filter" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="150s" />
+            <com.google.android.material.chip.Chip android:id="@+id/as180" style="@style/Widget.Material3.Chip.Filter" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="180s" />
+        </com.google.android.material.chip.ChipGroup>
+
         <TextView style="@style/SheetLabel" android:text="Cut-out quality" />
 
         <com.google.android.material.chip.ChipGroup
