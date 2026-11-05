@@ -79,6 +79,7 @@
                 android:id="@+id/timerChip"
                 style="@style/QuickChip"
                 android:contentDescription="Countdown timer"
+                android:paddingStart="13dp"
                 android:drawableStart="@drawable/ic_timer_off"
                 android:text="" />
         </LinearLayout>
@@ -233,14 +234,12 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 
-    <!-- Short on-screen messages (instead of system toasts) -->
+    <!-- Short on-screen messages (instead of system toasts). Centred so it can turn with the phone. -->
     <TextView
         android:id="@+id/hintText"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginStart="32dp"
-        android:layout_marginEnd="32dp"
-        android:layout_marginBottom="12dp"
+        android:maxWidth="300dp"
         android:alpha="0"
         android:background="@drawable/bg_hint"
         android:gravity="center"
@@ -251,7 +250,9 @@
         android:textColor="@android:color/white"
         android:textSize="14sp"
         android:visibility="gone"
-        app:layout_constraintBottom_toTopOf="@id/bottomArea"
+        app:layout_constraintVertical_bias="0.62"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 
@@ -267,112 +268,106 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent">
 
+        <!-- Adjust panel: compact so it never covers you. Icon tabs pick what the slider changes. -->
         <LinearLayout
             android:id="@+id/adjustPanel"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginStart="12dp"
             android:layout_marginEnd="12dp"
-            android:layout_marginBottom="8dp"
+            android:layout_marginBottom="6dp"
             android:background="@drawable/bg_card"
             android:orientation="vertical"
-            android:paddingStart="18dp"
-            android:paddingTop="14dp"
-            android:paddingEnd="18dp"
-            android:paddingBottom="8dp"
+            android:paddingStart="10dp"
+            android:paddingTop="8dp"
+            android:paddingEnd="10dp"
+            android:paddingBottom="4dp"
             android:visibility="gone">
 
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="Drag the picture to move yourself, pinch to resize"
-                android:textColor="@color/text_secondary"
-                android:textSize="12sp" />
-
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:gravity="center_vertical"
                 android:orientation="horizontal">
 
-                <TextView style="@style/AdjustLabel" android:text="Size" />
-
-                <com.google.android.material.slider.Slider
-                    android:id="@+id/sizeAdjust"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:valueFrom="50"
-                    android:valueTo="100" />
-            </LinearLayout>
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:gravity="center_vertical"
-                android:orientation="horizontal">
-
-                <TextView style="@style/AdjustLabel" android:text="Brightness" />
-
-                <com.google.android.material.slider.Slider
-                    android:id="@+id/brightAdjust"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:valueFrom="-1"
-                    android:valueTo="1" />
-            </LinearLayout>
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:gravity="center_vertical"
-                android:orientation="horizontal">
-
-                <TextView style="@style/AdjustLabel" android:text="Warmth" />
-
-                <com.google.android.material.slider.Slider
-                    android:id="@+id/warmAdjust"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:valueFrom="-1"
-                    android:valueTo="1" />
-            </LinearLayout>
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:gravity="center_vertical"
-                android:orientation="horizontal">
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/autoMatchBtn"
-                    style="@style/Widget.Material3.Button.TonalButton"
+                <LinearLayout
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="Auto match light" />
+                    android:background="@drawable/bg_pill_dark"
+                    android:orientation="horizontal"
+                    android:padding="2dp">
+
+                    <ImageButton
+                        android:id="@+id/tabSize"
+                        style="@style/AdjustTab"
+                        android:contentDescription="Size"
+                        android:src="@drawable/ic_open_in_full" />
+
+                    <ImageButton
+                        android:id="@+id/tabLight"
+                        style="@style/AdjustTab"
+                        android:contentDescription="Brightness"
+                        android:src="@drawable/ic_wb_sunny" />
+
+                    <ImageButton
+                        android:id="@+id/tabWarmth"
+                        style="@style/AdjustTab"
+                        android:contentDescription="Warmth"
+                        android:src="@drawable/ic_thermostat" />
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/adjustValue"
+                    android:layout_width="52dp"
+                    android:layout_height="wrap_content"
+                    android:fontFeatureSettings="tnum"
+                    android:gravity="center"
+                    android:textColor="@android:color/white"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
 
                 <Space
                     android:layout_width="0dp"
                     android:layout_height="1dp"
                     android:layout_weight="1" />
 
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/resetAdjustBtn"
-                    style="@style/Widget.Material3.Button.TextButton"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="Reset" />
+                <ImageButton
+                    android:id="@+id/autoMatchBtn"
+                    style="@style/RailIcon"
+                    android:layout_width="40dp"
+                    android:layout_height="40dp"
+                    android:padding="9dp"
+                    android:contentDescription="Match the backdrop's light"
+                    android:src="@drawable/ic_auto_fix_high" />
 
-                <com.google.android.material.button.MaterialButton
+                <ImageButton
+                    android:id="@+id/resetAdjustBtn"
+                    style="@style/RailIcon"
+                    android:layout_width="40dp"
+                    android:layout_height="40dp"
+                    android:padding="9dp"
+                    android:contentDescription="Reset"
+                    android:src="@drawable/ic_refresh" />
+
+                <ImageButton
                     android:id="@+id/doneAdjustBtn"
-                    style="@style/Widget.Material3.Button"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="4dp"
-                    android:text="Done" />
+                    style="@style/RailIcon"
+                    android:layout_width="40dp"
+                    android:layout_height="40dp"
+                    android:padding="8dp"
+                    android:contentDescription="Done"
+                    android:src="@drawable/ic_check"
+                    app:tint="@color/accent" />
             </LinearLayout>
+
+            <com.google.android.material.slider.Slider
+                android:id="@+id/adjustSlider"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:valueFrom="50"
+                android:valueTo="100"
+                android:value="100"
+                app:labelBehavior="gone" />
         </LinearLayout>
 
         <!-- Lens switch (0.6x / 1x); hidden when the camera has no wider lens -->

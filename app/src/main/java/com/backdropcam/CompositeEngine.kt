@@ -577,6 +577,14 @@ class CompositeEngine(context: Context) {
         GLES30.glUniform1f(loc("uPersonScale"), if (movable) personScale else 1f)
         GLES30.glUniform2f(loc("uPersonAnchor"), 0.5f, 0.5f - cy / 2f)
         GLES30.glUniform2f(loc("uPersonOffset"), if (movable) personOffX * cx else 0f, if (movable) personOffY * cy else 0f)
+        // When the person is shrunk or moved, the edges of the camera picture become visible over
+        // the backdrop; fade them out instead of showing a hard straight line (e.g. through hair).
+        val transformed = movable && (personScale < 0.995f || personOffX != 0f || personOffY != 0f)
+        GLES30.glUniform2f(
+            loc("uFeather"),
+            if (transformed) 0.05f else 0.0001f,
+            if (transformed && personOffY > 0.001f) 0.05f else 0.0001f
+        )
         GLES30.glUniform1f(loc("uGain"), gain)
         GLES30.glUniform1f(loc("uWarm"), warmth)
         val worldAspect = if (wh > 0) ww.toFloat() * cx / (wh * cy) else 1f
@@ -750,6 +758,7 @@ uniform vec2 uCrop;
 uniform float uPersonScale;
 uniform vec2 uPersonAnchor;
 uniform vec2 uPersonOffset;
+uniform vec2 uFeather; // x: fade at top and sides, y: fade at the bottom
 uniform float uGain;
 uniform float uWarm;
 out vec4 outColor;
@@ -771,7 +780,8 @@ void main() {
     // Where this output pixel falls in the (possibly shrunk and moved) person layer.
     vec2 p = (vW - uPersonAnchor - uPersonOffset) / uPersonScale + uPersonAnchor;
     vec3 cam = camAt(p);
-    float inside = step(0.0, p.x) * step(p.x, 1.0) * step(0.0, p.y) * step(p.y, 1.0);
+    float inside = smoothstep(0.0, uFeather.x, p.x) * smoothstep(0.0, uFeather.x, 1.0 - p.x)
+                 * smoothstep(0.0, uFeather.x, 1.0 - p.y) * smoothstep(0.0, uFeather.y, p.y);
 
     float m = 1.0;
     if (uHasMask > 0.5) {

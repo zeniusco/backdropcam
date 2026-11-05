@@ -197,6 +197,7 @@ class MainActivity : AppCompatActivity() {
             onGeometry = { w, h -> onCameraGeometry(w, h) }
             onFraming = { f ->
                 lastFraming = f
+                warnIfHeadCut(f)
                 if (settings.handsFree && recorder == null && countdown == null && !speaker.isSpeaking) coach.update(f)
             }
             framingWanted = settings.handsFree
@@ -341,6 +342,7 @@ class MainActivity : AppCompatActivity() {
                     deviceRotation = target
                     engine.setDeviceRotation(target)
                     rotateControls(target)
+                    updateTeleUi()
                 }
             }
         }
@@ -573,7 +575,9 @@ class MainActivity : AppCompatActivity() {
             override fun onScale(d: ScaleGestureDetector): Boolean {
                 if (adjustOpen) {
                     settings.personScale = (settings.personScale * d.scaleFactor).coerceIn(0.5f, 1f)
-                    ui.sizeAdjust.value = settings.personScale * 100f
+                    if (adjustTab != AdjustTab.SIZE) selectAdjustTab(AdjustTab.SIZE, explain = false)
+                    else ui.adjustSlider.value = settings.personScale * 100f
+                    updateAdjustValue()
                     applyPersonAndColor()
                     return true
                 }
@@ -688,8 +692,11 @@ class MainActivity : AppCompatActivity() {
             col.addView(TextView(this).apply {
                 text = label
                 textSize = 10f
+                gravity = Gravity.CENTER
                 setTextColor(0xCCFFFFFF.toInt())
-                setPadding(0, dp(2), 0, 0)
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { topMargin = dp(2) }
             })
             tile.addView(col)
         }
@@ -758,32 +765,79 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private enum class AdjustTab { SIZE, LIGHT, WARMTH }
+
+    private var adjustTab = AdjustTab.SIZE
+
+    /**
+     * One slider, three icon tabs (size / brightness / warmth). Keeps the panel short so it never
+     * covers you while you watch the effect.
+     */
     private fun setupAdjustPanel() {
-        syncAdjustSliders()
-        ui.sizeAdjust.addOnChangeListener { _, v, fromUser ->
-            if (fromUser) { settings.personScale = v / 100f; applyPersonAndColor() }
-        }
-        ui.brightAdjust.addOnChangeListener { _, v, fromUser ->
-            if (fromUser) { settings.brightness = v; applyPersonAndColor() }
-        }
-        ui.warmAdjust.addOnChangeListener { _, v, fromUser ->
-            if (fromUser) { settings.warmth = v; applyPersonAndColor() }
-        }
-        ui.autoMatchBtn.setOnClickListener { autoMatchLight() }
-        ui.resetAdjustBtn.setOnClickListener {
-            settings.personScale = 0.85f; settings.personOffX = 0f; settings.personOffY = 0f
-            settings.brightness = 0f; settings.warmth = 0f
-            syncAdjustSliders()
+        ui.adjustSlider.addOnChangeListener { _, v, fromUser ->
+            if (!fromUser) return@addOnChangeListener
+            when (adjustTab) {
+                AdjustTab.SIZE -> settings.personScale = v / 100f
+                AdjustTab.LIGHT -> settings.brightness = v / 100f
+                AdjustTab.WARMTH -> settings.warmth = v / 100f
+            }
+            updateAdjustValue()
             applyPersonAndColor()
         }
+        ui.tabSize.setOnClickListener { selectAdjustTab(AdjustTab.SIZE, explain = true) }
+        ui.tabLight.setOnClickListener { selectAdjustTab(AdjustTab.LIGHT, explain = true) }
+        ui.tabWarmth.setOnClickListener { selectAdjustTab(AdjustTab.WARMTH, explain = true) }
+        ui.autoMatchBtn.setOnClickListener { autoMatchLight() }
+        ui.resetAdjustBtn.setOnClickListener {
+            settings.personScale = 1f; settings.personOffX = 0f; settings.personOffY = 0f
+            settings.brightness = 0f; settings.warmth = 0f
+            selectAdjustTab(adjustTab, explain = false)
+            applyPersonAndColor()
+            hint("Size, position and light reset")
+        }
         ui.doneAdjustBtn.setOnClickListener { setAdjustOpen(false) }
+        selectAdjustTab(AdjustTab.SIZE, explain = false)
         applyPersonAndColor()
     }
 
-    private fun syncAdjustSliders() {
-        ui.sizeAdjust.value = (settings.personScale * 100f).coerceIn(50f, 100f)
-        ui.brightAdjust.value = settings.brightness.coerceIn(-1f, 1f)
-        ui.warmAdjust.value = settings.warmth.coerceIn(-1f, 1f)
+    private fun selectAdjustTab(tab: AdjustTab, explain: Boolean) {
+        adjustTab = tab
+        val s = ui.adjustSlider
+        // Change the range in an order that keeps the current value valid at every step.
+        if (tab == AdjustTab.SIZE) {
+            s.value = 75f
+            s.valueFrom = 50f
+            s.valueTo = 100f
+            s.value = (settings.personScale * 100f).coerceIn(50f, 100f)
+        } else {
+            s.valueFrom = -100f
+            s.valueTo = 100f
+            s.value = ((if (tab == AdjustTab.LIGHT) settings.brightness else settings.warmth) * 100f).coerceIn(-100f, 100f)
+        }
+        setActive(ui.tabSize, tab == AdjustTab.SIZE)
+        setActive(ui.tabLight, tab == AdjustTab.LIGHT)
+        setActive(ui.tabWarmth, tab == AdjustTab.WARMTH)
+        updateAdjustValue()
+        if (explain) hint(
+            when (tab) {
+                AdjustTab.SIZE -> "Size: make yourself smaller over the backdrop. Drag the picture to move."
+                AdjustTab.LIGHT -> "Brightness of you (not the backdrop)"
+                AdjustTab.WARMTH -> "Warmth of you: left cooler, right warmer"
+            }
+        )
+    }
+
+    private fun updateAdjustValue() {
+        ui.adjustValue.text = when (adjustTab) {
+            AdjustTab.SIZE -> "${(settings.personScale * 100f).roundToInt()}%"
+            AdjustTab.LIGHT -> signed(settings.brightness)
+            AdjustTab.WARMTH -> signed(settings.warmth)
+        }
+    }
+
+    private fun signed(v: Float): String {
+        val n = (v * 100f).roundToInt()
+        return if (n > 0) "+$n" else "$n"
     }
 
     private fun applyPersonAndColor() {
@@ -798,8 +852,25 @@ class MainActivity : AppCompatActivity() {
         ui.stripScroll.visibility = if (open) View.GONE else View.VISIBLE
         updateLensRowVisibility()
         setActive(ui.tuneBtn, open)
-        if (open && settings.backdrop == KEY_NONE) hint("Pick a backdrop to resize or move yourself")
+        if (open && !hasBackdropImage()) hint("Pick a backdrop image to resize or move yourself")
     }
+
+    private var lastHeadHintMs = 0L
+
+    /**
+     * If you are shrunk over a backdrop but your head touches the top of what the camera sees,
+     * the camera simply has no picture above it. Say so, once in a while.
+     */
+    private fun warnIfHeadCut(f: CompositeEngine.Framing) {
+        if (!hasBackdropImage() || settings.personScale > 0.99f || recorder != null) return
+        if (f.coverage < 0.03f || f.top > 0.02f) return
+        val now = System.currentTimeMillis()
+        if (now - lastHeadHintMs < 25_000) return
+        lastHeadHintMs = now
+        hint("Your head touches the top of the camera view. Step back a little, or set Size to 100%.")
+    }
+
+    private fun hasBackdropImage() = settings.backdrop != KEY_NONE && settings.backdrop != KEY_BLUR
 
     /** Moves the person by a drag on the screen (fractions of the screen, y down). */
     private fun movePerson(dxScreen: Float, dyScreen: Float) {
@@ -821,7 +892,7 @@ class MainActivity : AppCompatActivity() {
     private fun autoMatchLight() {
         val bg = backdropMean
         val f = lastFraming
-        if (bg == null || settings.backdrop == KEY_NONE || settings.backdrop == KEY_BLUR) {
+        if (bg == null || !hasBackdropImage()) {
             return hint("Choose a backdrop image first")
         }
         if (f == null || f.coverage < 0.02f) return hint("Step into the frame first")
@@ -833,7 +904,7 @@ class MainActivity : AppCompatActivity() {
         val tb = (bg[0] - bg[2]) / (lb + 0.05f)
         settings.brightness = (ln(gainValue) / ln(2f)).coerceIn(-1f, 1f)
         settings.warmth = ((tb - tp) * 3f).coerceIn(-1f, 1f)
-        syncAdjustSliders()
+        selectAdjustTab(if (adjustTab == AdjustTab.SIZE) AdjustTab.LIGHT else adjustTab, explain = false)
         applyPersonAndColor()
         hint("Matched to the backdrop's light")
     }
@@ -1062,13 +1133,10 @@ class MainActivity : AppCompatActivity() {
     private fun updateTimerUi() {
         val t = settings.timer
         ui.timerChip.text = if (t == 0) "" else "${t}s"
-        ui.timerChip.compoundDrawablePadding = if (t == 0) 0 else dp(4)
-        ui.timerChip.setCompoundDrawablesRelativeWithIntrinsicBounds(
-            if (t == 0) R.drawable.ic_timer_off else R.drawable.ic_timer, 0, 0, 0
-        )
-        val color = if (t == 0) 0xFFFFFFFF.toInt() else ContextCompat.getColor(this, R.color.accent)
-        ui.timerChip.setTextColor(color)
-        TextViewCompat.setCompoundDrawableTintList(ui.timerChip, ColorStateList.valueOf(color))
+        ui.timerChip.setPaddingRelative(if (t == 0) dp(13) else 0, 0, 0, 0)
+        ui.timerChip.setCompoundDrawablesRelativeWithIntrinsicBounds(if (t == 0) R.drawable.ic_timer_off else 0, 0, 0, 0)
+        ui.timerChip.setTextColor(if (t == 0) 0xFFFFFFFF.toInt() else ContextCompat.getColor(this, R.color.accent))
+        TextViewCompat.setCompoundDrawableTintList(ui.timerChip, ColorStateList.valueOf(0xFFFFFFFF.toInt()))
     }
 
     // ================================================================== microphone
@@ -1367,7 +1435,8 @@ class MainActivity : AppCompatActivity() {
         val front = settings.frontCamera
         ui.teleBtn.visibility = if (front) View.VISIBLE else View.GONE
         val script = settings.teleScript?.let { scripts.load(it) }
-        val show = front && settings.teleOn && script != null && script.body.isNotBlank()
+        // The script box is laid out for portrait; it would read sideways with the phone turned.
+        val show = front && settings.teleOn && script != null && script.body.isNotBlank() && deviceRotation % 180 == 0
         ui.teleBox.visibility = if (show) View.VISIBLE else View.GONE
         if (!show) teleRunning = false
         if (script != null) ui.teleText.text = script.body
@@ -1499,10 +1568,14 @@ class MainActivity : AppCompatActivity() {
             270 -> 90f
             else -> 0f
         }
-        // Icons and tiles turn; text (chips, timer pill, hints) stays readable in place.
+        // Every control turns in place so icons and text read upright. The top-bar toggles are
+        // square, and the pill and hint are centred with room around them, so nothing clips.
         val views = mutableListOf<View>(
-            ui.settingsBtn, ui.flashBtn, ui.micBtn, ui.handsBtn, ui.tuneBtn, ui.teleBtn,
-            ui.pauseBtn, ui.flipBtn, ui.lastThumb, ui.countdownText
+            ui.settingsBtn, ui.flashBtn, ui.aspectChip, ui.qualityChip, ui.timerChip,
+            ui.micBtn, ui.handsBtn, ui.tuneBtn, ui.teleBtn,
+            ui.pauseBtn, ui.flipBtn, ui.lastThumb, ui.countdownText, ui.recPill, ui.hintText,
+            ui.tabSize, ui.tabLight, ui.tabWarmth, ui.adjustValue,
+            ui.autoMatchBtn, ui.resetAdjustBtn, ui.doneAdjustBtn
         )
         for (i in 0 until ui.zoomRow.childCount) views += ui.zoomRow.getChildAt(i)
         for (i in 0 until ui.backdropStrip.childCount) views += ui.backdropStrip.getChildAt(i)

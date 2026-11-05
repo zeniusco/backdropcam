@@ -71,10 +71,10 @@ class AppSettings(context: Context) {
 
     val fullScreen: Boolean get() = viewMode == "full"
 
-    /** Person size, 0.5..1 */
+    /** Person size over a backdrop, 0.5..1 (1 = as filmed). New key so everyone starts at 100 %. */
     var personScale: Float
-        get() = p.getFloat("personScale", 0.85f)
-        set(v) = p.edit().putFloat("personScale", v).apply()
+        get() = p.getFloat("personSize", 1f)
+        set(v) = p.edit().putFloat("personSize", v).apply()
 
     var personOffX: Float
         get() = p.getFloat("personOffX", 0f)
