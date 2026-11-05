@@ -54,6 +54,16 @@ class AppSettings(context: Context) {
         get() = p.getString("lastVideo", null)
         set(v) = p.edit().putString("lastVideo", v).apply()
 
+    /** Spoken framing guidance, "say start" and "clap twice to stop". */
+    var handsFree: Boolean
+        get() = p.getBoolean("handsFree", false)
+        set(v) = p.edit().putBoolean("handsFree", v).apply()
+
+    /** Open the camera at its widest (zoomed out) view. */
+    var wideStart: Boolean
+        get() = p.getBoolean("wideStart", true)
+        set(v) = p.edit().putBoolean("wideStart", v).apply()
+
     val qualityCap: Int
         get() = when (quality) {
             "1080" -> 1920

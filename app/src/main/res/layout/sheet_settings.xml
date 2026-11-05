@@ -84,6 +84,20 @@
             android:text="Mirror front camera (like a mirror)" />
 
         <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/wideSwitch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="Start zoomed out (widest view)" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/handsFreeSwitch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="Hands-free: voice guide, say &quot;start&quot;, clap twice to stop" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
             android:id="@+id/autoUploadSwitch"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

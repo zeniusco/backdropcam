@@ -44,8 +44,12 @@ class VideoRecorder(
     private val gain: () -> Float,
     private val muted: () -> Boolean,
     private val onLevel: (Float) -> Unit,
+    private val onPcm: ((ShortArray, Int, Long) -> Unit)? = null,
     private val fps: Int = 30,
 ) {
+    /** Samples after this time (us) are dropped, e.g. to cut the claps used to stop recording. */
+    @Volatile var cutoffUs = Long.MAX_VALUE
+
     private val appContext = context.applicationContext
     private val resolver = appContext.contentResolver
     val startNs = System.nanoTime()
@@ -215,6 +219,8 @@ class VideoRecorder(
                         if (audioRunning) {
                             val n = rec.read(pcm, 0, minOf(pcm.size, buf.remaining() / 2))
                             if (n > 0) {
+                                val ptsUs = nowUs - n * 1_000_000L / SAMPLE_RATE
+                                onPcm?.invoke(pcm, n, ptsUs) // raw audio, before gain and mute
                                 val level = AudioLevel.process(pcm, n, gain(), muted())
                                 val now = System.currentTimeMillis()
                                 if (now - lastLevelMs > 60) {
@@ -222,7 +228,6 @@ class VideoRecorder(
                                     onLevel(level)
                                 }
                                 buf.order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().put(pcm, 0, n)
-                                val ptsUs = nowUs - n * 1_000_000L / SAMPLE_RATE
                                 codec.queueInputBuffer(idx, 0, n * 2, max(0L, ptsUs), 0)
                             } else {
                                 codec.queueInputBuffer(idx, 0, 0, nowUs, 0)
@@ -257,7 +262,9 @@ class VideoRecorder(
             idx >= 0 -> {
                 val buf = codec.getOutputBuffer(idx)!!
                 if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) info.size = 0
-                if (info.size > 0 && trackIndex[slot] >= 0 && info.presentationTimeUs > lastPts[slot]) {
+                if (info.size > 0 && trackIndex[slot] >= 0 && info.presentationTimeUs > lastPts[slot] &&
+                    info.presentationTimeUs <= cutoffUs
+                ) {
                     lastPts[slot] = info.presentationTimeUs
                     buf.position(info.offset)
                     buf.limit(info.offset + info.size)

@@ -85,6 +85,12 @@ class MainActivity : AppCompatActivity() {
     private var deviceRotation = 0
     private var torchOn = false
     private var zoomStops: List<Float> = emptyList()
+    private var pendingWideZoom = false
+
+    // Hands-free mode
+    private lateinit var speaker: Speaker
+    private lateinit var coach: FramingCoach
+    private lateinit var voice: VoiceCommands
 
     @Volatile private var micGain = 1f
     @Volatile private var micMuted = false
@@ -133,6 +139,13 @@ class MainActivity : AppCompatActivity() {
 
         engine = CompositeEngine(this)
         engine.onGeometry = { w, h -> onCameraGeometry(w, h) }
+        speaker = Speaker(this)
+        coach = FramingCoach { speaker.say(it) }
+        voice = VoiceCommands(this) { onVoiceStart() }
+        engine.framingWanted = settings.handsFree
+        engine.onFraming = { f ->
+            if (settings.handsFree && recorder == null && countdown == null && !speaker.isSpeaking) coach.update(f)
+        }
         applyEngineOptions()
         loadSegmenter()
 
@@ -157,6 +170,7 @@ class MainActivity : AppCompatActivity() {
         ui.settingsBtn.setOnClickListener { showSettings() }
         ui.micBtn.setOnClickListener { onMicPressed() }
         ui.flashBtn.setOnClickListener { toggleTorch() }
+        ui.handsBtn.setOnClickListener { setHandsFree(!settings.handsFree, announce = true) }
         ui.timerBtn.setOnClickListener { cycleTimer() }
         ui.qualityChip.setOnClickListener { cycleQuality() }
         ui.flipBtn.setOnClickListener { flipCamera() }
@@ -165,6 +179,7 @@ class MainActivity : AppCompatActivity() {
 
         updateMicIcon()
         updateTimerUi()
+        updateHandsFreeUi()
         buildBackdropStrip()
         applyBackdropSelection()
         lastVideo?.let { loadThumbInto(it, ui.lastThumb) }
@@ -197,6 +212,7 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         if (orientationListener.canDetectOrientation()) orientationListener.enable()
+        if (settings.handsFree && recorder == null) startListening()
     }
 
     override fun onPause() {
@@ -206,10 +222,14 @@ class MainActivity : AppCompatActivity() {
         if (recorder != null) stopRecording()
         micMonitor?.stop()
         micMonitor = null
+        voice.stop()
+        speaker.stop()
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        voice.stop()
+        speaker.shutdown()
         engine.release()
         io.shutdown()
         uploadExecutor.shutdown()
@@ -293,33 +313,18 @@ class MainActivity : AppCompatActivity() {
         val cam = camera ?: return
         ui.flashBtn.visibility = if (cam.cameraInfo.hasFlashUnit()) View.VISIBLE else View.GONE
         ui.flashBtn.setImageResource(R.drawable.ic_flash_off)
-
         ui.zoomRow.removeAllViews()
-        val state = cam.cameraInfo.zoomState.value
-        val minZ = state?.minZoomRatio ?: 1f
-        val maxZ = state?.maxZoomRatio ?: 1f
-        val stops = mutableListOf<Float>()
-        zoomStops = stops
-        if (minZ < 0.95f) stops += minZ
-        stops += 1f
-        if (maxZ >= 2f) stops += 2f
-        if (maxZ >= 5f) stops += 5f
-        if (stops.size > 1) {
-            for (z in stops) {
-                val tv = TextView(this).apply {
-                    text = if (z < 1f) String.format("%.1f", z) else "${z.toInt()}x"
-                    setTextColor(0xFFFFFFFF.toInt())
-                    textSize = 12f
-                    gravity = android.view.Gravity.CENTER
-                    background = ContextCompat.getDrawable(context, R.drawable.bg_circle_dark)
-                    layoutParams = LinearLayout.LayoutParams(dp(38), dp(38)).apply { marginStart = dp(6); marginEnd = dp(6) }
-                    setOnClickListener { cam.cameraControl.setZoomRatio(z) }
-                }
-                ui.zoomRow.addView(tv)
-            }
-        }
+        zoomStops = emptyList()
+        pendingWideZoom = settings.wideStart
+
         cam.cameraInfo.zoomState.removeObservers(this)
         cam.cameraInfo.zoomState.observe(this) { zs ->
+            if (camera !== cam) return@observe
+            if (zoomStops.isEmpty()) buildZoomChips(cam, zs.minZoomRatio, zs.maxZoomRatio)
+            if (pendingWideZoom) {
+                pendingWideZoom = false
+                if (zs.minZoomRatio < 0.99f) cam.cameraControl.setZoomRatio(zs.minZoomRatio)
+            }
             val current = zoomStops
             for (i in 0 until ui.zoomRow.childCount) {
                 val tv = ui.zoomRow.getChildAt(i) as? TextView ?: continue
@@ -327,9 +332,34 @@ class MainActivity : AppCompatActivity() {
                 val next = current.getOrNull(i + 1) ?: Float.MAX_VALUE
                 val active = zs.zoomRatio >= z - 0.05f && zs.zoomRatio < next - 0.05f
                 tv.setTextColor(if (active) 0xFFFFD54F.toInt() else 0xFFFFFFFF.toInt())
-                if (active && abs(zs.zoomRatio - z) > 0.05f) tv.text = String.format("%.1fx", zs.zoomRatio)
-                else tv.text = if (z < 1f) String.format("%.1f", z) else "${z.toInt()}x"
+                tv.text = if (active && abs(zs.zoomRatio - z) > 0.05f) String.format("%.1fx", zs.zoomRatio) else zoomLabel(z)
             }
+        }
+        rotateControls(deviceRotation)
+    }
+
+    private fun zoomLabel(z: Float) = if (z < 1f) String.format("%.1f", z) else "${z.toInt()}x"
+
+    private fun buildZoomChips(cam: Camera, minZ: Float, maxZ: Float) {
+        val stops = mutableListOf<Float>()
+        if (minZ < 0.95f) stops += minZ
+        stops += 1f
+        if (maxZ >= 2f) stops += 2f
+        if (maxZ >= 5f) stops += 5f
+        zoomStops = stops
+        ui.zoomRow.removeAllViews()
+        if (stops.size < 2) return
+        for (z in stops) {
+            val tv = TextView(this).apply {
+                text = zoomLabel(z)
+                setTextColor(0xFFFFFFFF.toInt())
+                textSize = 12f
+                gravity = android.view.Gravity.CENTER
+                background = ContextCompat.getDrawable(context, R.drawable.bg_circle_dark)
+                layoutParams = LinearLayout.LayoutParams(dp(38), dp(38)).apply { marginStart = dp(6); marginEnd = dp(6) }
+                setOnClickListener { cam.cameraControl.setZoomRatio(z) }
+            }
+            ui.zoomRow.addView(tv)
         }
         rotateControls(deviceRotation)
     }
@@ -537,19 +567,22 @@ class MainActivity : AppCompatActivity() {
         when {
             recorder != null -> stopRecording()
             countdown != null -> cancelCountdown()
-            settings.timer > 0 -> startCountdown(settings.timer)
+            settings.timer > 0 || settings.handsFree -> startCountdown(max(settings.timer, if (settings.handsFree) 3 else 0))
             else -> startRecording()
         }
     }
 
     private fun startCountdown(seconds: Int) {
-        val tone = runCatching { ToneGenerator(AudioManager.STREAM_MUSIC, 70) }.getOrNull()
+        voice.stop()
+        val spoken = settings.handsFree
+        val tone = if (spoken) null else runCatching { ToneGenerator(AudioManager.STREAM_MUSIC, 70) }.getOrNull()
         ui.countdownText.visibility = View.VISIBLE
         ui.recordInner.background = ContextCompat.getDrawable(this, R.drawable.shutter_recording)
         countdown = object : CountDownTimer(seconds * 1000L, 1000L) {
             override fun onTick(msLeft: Long) {
-                ui.countdownText.text = ((msLeft + 999) / 1000).toString()
-                tone?.startTone(ToneGenerator.TONE_PROP_BEEP, 120)
+                val n = ((msLeft + 999) / 1000).toString()
+                ui.countdownText.text = n
+                if (spoken) speaker.say(n) else tone?.startTone(ToneGenerator.TONE_PROP_BEEP, 120)
             }
             override fun onFinish() {
                 tone?.release()
@@ -561,6 +594,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun cancelCountdown() {
+        if (countdown != null && settings.handsFree) {
+            speaker.say("Cancelled.") { startListening() }
+        }
         countdown?.cancel()
         countdown = null
         ui.countdownText.visibility = View.GONE
@@ -576,14 +612,27 @@ class MainActivity : AppCompatActivity() {
         val size = VideoRecorder.pickEncoderSize(ww, wh)
         val audio = settings.micOn && granted(Manifest.permission.RECORD_AUDIO)
         micMonitor?.stop(); micMonitor = null
+        voice.stop()
+        speaker.stop()
         micMuted = false
+        var recRef: VideoRecorder? = null
+        val clap = if (settings.handsFree && audio) {
+            ClapDetector(VideoRecorder.SAMPLE_RATE) { firstClapUs ->
+                val r = recRef ?: return@ClapDetector
+                // Cut the recording just before the claps so they are not in the video.
+                r.cutoffUs = max(0L, firstClapUs - 300_000L)
+                main.post { if (recorder === r) stopRecording() }
+            }
+        } else null
         try {
             val rec = VideoRecorder(
                 this, size.width, size.height, audio,
                 gain = { micGain },
                 muted = { micMuted },
                 onLevel = { level -> main.post { ui.levelBar.progress = (level * 100).toInt() } },
+                onPcm = clap?.let { c -> { pcm: ShortArray, n: Int, t: Long -> c.feed(pcm, n, t) } },
             )
+            recRef = rec
             rec.start()
             engine.startRecording(rec.inputSurface, size.width, size.height, rec.startNs, rotation)
             recorder = rec
@@ -620,7 +669,10 @@ class MainActivity : AppCompatActivity() {
                     val uri = rec.finish()
                     main.post { onVideoSaved(uri, rec) }
                 } catch (e: Exception) {
-                    main.post { toast("Save failed: ${e.message}") }
+                    main.post {
+                        toast("Save failed: ${e.message}")
+                        if (settings.handsFree) speaker.say("Sorry, saving failed.") { startListening() }
+                    }
                 }
             }
         }
@@ -636,6 +688,12 @@ class MainActivity : AppCompatActivity() {
         if (isFinishing || isDestroyed) return
         showResultSheet(uri, "${rec.width}x${rec.height}  saved to Movies/BackdropCam")
         if (settings.autoUpload) startUpload()
+        if (settings.handsFree) {
+            speaker.say("Saved. Say start to record again.") {
+                coach.reset()
+                startListening()
+            }
+        }
     }
 
     private fun setControlsEnabled(enabled: Boolean) {
@@ -695,6 +753,7 @@ class MainActivity : AppCompatActivity() {
             settings.micGain = micGain
             b.gainValue.text = "${value.toInt()}%"
         }
+        voice.stop()
         if (granted(Manifest.permission.RECORD_AUDIO)) {
             micMonitor = MicMonitor({ micGain }) { level ->
                 main.post { b.levelMeter.setProgressCompat((level * 100).toInt(), true) }
@@ -703,6 +762,7 @@ class MainActivity : AppCompatActivity() {
         dlg.setOnDismissListener {
             micMonitor?.stop()
             micMonitor = null
+            if (settings.handsFree && recorder == null) startListening()
         }
         dlg.show()
     }
@@ -754,6 +814,14 @@ class MainActivity : AppCompatActivity() {
             settings.mirrorFront = on
             applyEngineOptions()
         }
+        b.wideSwitch.isChecked = settings.wideStart
+        b.wideSwitch.setOnCheckedChangeListener { _, on ->
+            settings.wideStart = on
+            if (on) camera?.cameraInfo?.zoomState?.value?.let { camera?.cameraControl?.setZoomRatio(it.minZoomRatio) }
+            else camera?.cameraControl?.setZoomRatio(1f)
+        }
+        b.handsFreeSwitch.isChecked = settings.handsFree
+        b.handsFreeSwitch.setOnCheckedChangeListener { _, on -> setHandsFree(on, announce = true) }
         b.autoUploadSwitch.isChecked = settings.autoUpload
         b.autoUploadSwitch.setOnCheckedChangeListener { _, on -> settings.autoUpload = on }
         dlg.show()
@@ -881,6 +949,45 @@ class MainActivity : AppCompatActivity() {
         toast("Link copied")
     }
 
+    // ================================================================== hands-free
+
+    private fun setHandsFree(on: Boolean, announce: Boolean) {
+        if (on && !granted(Manifest.permission.RECORD_AUDIO)) {
+            toast("Hands-free needs microphone permission")
+            return
+        }
+        settings.handsFree = on
+        engine.framingWanted = on
+        updateHandsFreeUi()
+        coach.reset()
+        if (on) {
+            if (!voice.available) toast("Voice commands are not available on this phone; guidance still works")
+            if (announce) {
+                speaker.say("Hands-free on. I will guide you into the frame. Say start to record, and clap twice to stop.") {
+                    startListening()
+                }
+            } else startListening()
+        } else {
+            voice.stop()
+            if (announce) speaker.say("Hands-free off.")
+        }
+    }
+
+    private fun updateHandsFreeUi() {
+        val on = settings.handsFree
+        ui.handsBtn.alpha = if (on) 1f else 0.55f
+        ui.handsBtn.setColorFilter(if (on) 0xFFFFD54F.toInt() else 0xFFFFFFFF.toInt())
+    }
+
+    private fun startListening() {
+        if (settings.handsFree && recorder == null && countdown == null && !isFinishing) voice.start()
+    }
+
+    private fun onVoiceStart() {
+        if (recorder != null || countdown != null) return
+        speaker.say("Okay. Recording in") { if (recorder == null && countdown == null) startCountdown(3) }
+    }
+
     // ================================================================== helpers
 
     /** Keeps icons upright when the phone is turned, like the built-in camera app. */
@@ -892,7 +999,7 @@ class MainActivity : AppCompatActivity() {
             else -> 0f
         }
         val views = mutableListOf<View>(
-            ui.settingsBtn, ui.flashBtn, ui.timerBox, ui.qualityChip, ui.micBtn,
+            ui.settingsBtn, ui.flashBtn, ui.timerBox, ui.handsBtn, ui.qualityChip, ui.micBtn,
             ui.flipBtn, ui.lastThumb, ui.countdownText, ui.recPill
         )
         for (i in 0 until ui.zoomRow.childCount) views += ui.zoomRow.getChildAt(i)

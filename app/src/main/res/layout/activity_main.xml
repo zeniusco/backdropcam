@@ -68,6 +68,13 @@
                 android:textStyle="bold" />
         </FrameLayout>
 
+        <ImageButton
+            android:id="@+id/handsBtn"
+            style="@style/RoundIcon"
+            android:layout_marginStart="10dp"
+            android:contentDescription="Hands-free voice mode"
+            android:src="@drawable/ic_record_voice_over" />
+
         <Space
             android:layout_width="0dp"
             android:layout_height="1dp"

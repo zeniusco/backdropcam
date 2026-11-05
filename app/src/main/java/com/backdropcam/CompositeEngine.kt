@@ -116,6 +116,28 @@ class CompositeEngine(context: Context) {
     private var maskReady = false
     private var maskGen = 0
 
+    /** Set true to keep segmenting (for framing guidance) even with no background effect. */
+    @Volatile var framingWanted = false
+
+    /** Main-thread callback with where the person is in the frame. */
+    var onFraming: ((Framing) -> Unit)? = null
+    private var lastFramingMs = 0L
+
+    /**
+     * Where the person is, in the recorded picture (0..1, y down).
+     * [mirrored] is true when the picture is a mirror image (front camera, mirror on).
+     */
+    class Framing(
+        val coverage: Float,
+        val centerX: Float,
+        val left: Float,
+        val right: Float,
+        val top: Float,
+        val bottom: Float,
+        val mirrored: Boolean,
+        val landscape: Boolean,
+    )
+
     /** Maps preview (screen) uv to camera buffer uv. Used for tap-to-focus. */
     @Volatile private var focusMatrix: FloatArray? = null
 
@@ -272,12 +294,17 @@ class CompositeEngine(context: Context) {
         val a01 = stMatrix[4]; val a11 = stMatrix[5]
         val swapsAxes = abs(a00) < abs(a10)
         // A plain (unmirrored) SurfaceTexture transform always contains one vertical flip, so its
-        // determinant is negative. Positive means the producer mirrored the image (front cameras).
+        // determinant is negative. Positive means the producer mirrored the image.
         val mirrored = (a00 * a11 - a01 * a10) > 0f
         val extraRotation = if (!swapsAxes && sensorRotation % 180 != 0) sensorRotation else 0
 
+        // Turning the phone must turn the picture like a window (back camera) or a mirror (front
+        // camera). Both behave the same way; an un-mirrored front image would turn the wrong way.
+        // So bring every camera to that "window" form here, and apply the user's mirror choice
+        // later in world space.
+        val needsFlip = if (isFront) !mirrored else mirrored
         var fix = rotC(extraRotation)
-        if (mirrored) fix = mul(fix, flipXC())
+        if (needsFlip) fix = mul(fix, flipXC())
         fixMatrix = fix
 
         val portraitSwap = swapsAxes || extraRotation % 180 != 0
@@ -285,7 +312,7 @@ class CompositeEngine(context: Context) {
         val nh = if (portraitSwap) bufW else bufH
         naturalWidth = nw; naturalHeight = nh
         geometryReady = true
-        Log.i(TAG, "camera ${bufW}x$bufH swaps=$swapsAxes mirrored=$mirrored extra=$extraRotation -> natural ${nw}x$nh")
+        Log.i(TAG, "camera ${bufW}x$bufH front=$isFront swaps=$swapsAxes mirrored=$mirrored extra=$extraRotation -> natural ${nw}x$nh")
         ContextCompat.getMainExecutor(appContext).execute { onGeometry?.invoke(nw, nh) }
     }
 
@@ -302,7 +329,8 @@ class CompositeEngine(context: Context) {
         st.getTransformMatrix(stMatrix)
         if (!geometryReady) computeGeometry()
 
-        val personMirror = if (isFront && mirrorFront) flipXC() else identity()
+        // Front camera is a mirror view at this point; un-mirror it if the user turned mirroring off.
+        val personMirror = if (isFront && !mirrorFront) flipXC() else identity()
         camFromW = mul(mul(mul(stMatrix.copyOf(), fixMatrix), rotC(deviceRotation)), personMirror)
 
         ensureSmallTarget()
@@ -355,7 +383,7 @@ class CompositeEngine(context: Context) {
         // Flip y so the read-back rows come out top-first (an upright Bitmap).
         render(smallW, smallH, flipYC(), MODE_RAW)
 
-        if (mode != MODE_NONE && segmenter != null && segBusy.compareAndSet(false, true)) {
+        if ((mode != MODE_NONE || framingWanted) && segmenter != null && segBusy.compareAndSet(false, true)) {
             val buf = readBuf!!
             buf.clear()
             GLES30.glReadPixels(0, 0, smallW, smallH, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, buf)
@@ -368,10 +396,15 @@ class CompositeEngine(context: Context) {
             bmp!!.copyPixelsFromBuffer(buf)
             val gen = maskGen
             val frame = bmp
+            val mirroredView = isFront && mirrorFront
+            val landscape = deviceRotation % 180 != 0
             segExecutor.execute {
                 try {
                     val result = segmenter?.segment(frame)
-                    if (result != null) handler.post { if (gen == maskGen) uploadMask(result) }
+                    if (result != null) {
+                        handler.post { if (gen == maskGen) uploadMask(result) }
+                        reportFraming(result, mirroredView, landscape)
+                    }
                 } catch (t: Throwable) {
                     Log.e(TAG, "segmentation failed", t)
                 } finally {
@@ -380,6 +413,47 @@ class CompositeEngine(context: Context) {
             }
         }
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+    }
+
+    /** Runs on the segmentation thread. */
+    private fun reportFraming(mask: PersonSegmenter.Mask, mirrored: Boolean, landscape: Boolean) {
+        val cb = onFraming ?: return
+        val now = System.currentTimeMillis()
+        if (now - lastFramingMs < 150) return
+        lastFramingMs = now
+        val w = mask.width
+        val h = mask.height
+        var count = 0
+        var sumX = 0L
+        var minX = w; var maxX = -1; var minY = h; var maxY = -1
+        var y = 0
+        while (y < h) {
+            var x = 0
+            val row = y * w
+            while (x < w) {
+                if ((mask.data[row + x].toInt() and 0xFF) > 140) {
+                    count++
+                    sumX += x
+                    if (x < minX) minX = x
+                    if (x > maxX) maxX = x
+                    if (y < minY) minY = y
+                    if (y > maxY) maxY = y
+                }
+                x += 2
+            }
+            y += 2
+        }
+        val total = ((w + 1) / 2) * ((h + 1) / 2)
+        val f = if (count == 0) {
+            Framing(0f, 0.5f, 0f, 0f, 0f, 0f, mirrored, landscape)
+        } else {
+            Framing(
+                count.toFloat() / total, sumX.toFloat() / count / w,
+                minX.toFloat() / w, maxX.toFloat() / w, minY.toFloat() / h, maxY.toFloat() / h,
+                mirrored, landscape
+            )
+        }
+        ContextCompat.getMainExecutor(appContext).execute { cb(f) }
     }
 
     private fun uploadMask(mask: PersonSegmenter.Mask) {
