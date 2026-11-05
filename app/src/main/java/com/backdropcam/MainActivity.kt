@@ -58,6 +58,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.view.updatePadding
 import androidx.core.widget.ImageViewCompat
+import androidx.core.widget.TextViewCompat
 import com.backdropcam.databinding.ActivityMainBinding
 import com.backdropcam.databinding.DialogScriptBinding
 import com.backdropcam.databinding.SheetMicBinding
@@ -110,10 +111,12 @@ class MainActivity : AppCompatActivity() {
     private var cropX = 1f
     private var cropY = 1f
     private var noWideHintShown = false
+    private var foreground = false
 
     // Recording
     private var recorder: VideoRecorder? = null
     private var countdown: CountDownTimer? = null
+    private var countdownTone: ToneGenerator? = null
     private var recDotBlink: ObjectAnimator? = null
     @Volatile private var micGain = 1f
     @Volatile private var micMuted = false
@@ -201,12 +204,12 @@ class MainActivity : AppCompatActivity() {
         speaker = Speaker(this)
         coach = FramingCoach { speak(it) }
         voice = KeywordSpotter(this) { word, atUs -> main.post { onKeyword(word, atUs) } }
-        voice.load { ok ->
-            main.post {
-                if (!ok && settings.handsFree) hint("Voice commands could not start. Guidance still works.")
-                startListening()
-            }
+        // Whenever the phone stops talking (for any reason) the ear opens again shortly after.
+        speaker.onIdle = {
+            voice.mutedUntil = System.currentTimeMillis() + 700
+            startListening()
         }
+        if (settings.handsFree) loadVoice()
         applyEngineOptions()
         loadSegmenter()
 
@@ -233,12 +236,14 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        foreground = true
         if (orientationListener.canDetectOrientation()) orientationListener.enable()
         startListening()
     }
 
     override fun onPause() {
         super.onPause()
+        foreground = false
         orientationListener.disable()
         cancelCountdown(announce = false)
         if (recorder != null) stopRecording()
@@ -254,8 +259,8 @@ class MainActivity : AppCompatActivity() {
         voice.close()
         speaker.shutdown()
         engine.release()
-        io.shutdown()
-        uploadExecutor.shutdown()
+        // The executors are left running: a save or upload that is still in flight finishes on
+        // its own, and its result is dropped because the activity is gone.
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -308,7 +313,7 @@ class MainActivity : AppCompatActivity() {
         ui.qualityChip.setOnClickListener { cycleQuality() }
         ui.timerChip.setOnClickListener { cycleTimer() }
         ui.micBtn.setOnClickListener { onMicPressed() }
-        ui.handsBtn.setOnClickListener { setHandsFree(!settings.handsFree) }
+        ui.handsBtn.setOnClickListener { if (!busy()) setHandsFree(!settings.handsFree) }
         ui.tuneBtn.setOnClickListener { setAdjustOpen(!adjustOpen) }
         ui.teleBtn.setOnClickListener { showScriptsSheet() }
         // Tap the script to pause / resume scrolling (also handy for rehearsing).
@@ -403,6 +408,7 @@ class MainActivity : AppCompatActivity() {
         // INVISIBLE (not GONE) keeps the top bar symmetric on cameras without a torch.
         ui.flashBtn.visibility = if (cam.cameraInfo.hasFlashUnit()) View.VISIBLE else View.INVISIBLE
         ui.flashBtn.setImageResource(R.drawable.ic_flash_off)
+        setActive(ui.flashBtn, false)
         ui.zoomRow.removeAllViews()
 
         var checkZoomOut = false
@@ -550,7 +556,6 @@ class MainActivity : AppCompatActivity() {
     private fun flipCamera() {
         if (busy()) return
         settings.frontCamera = !settings.frontCamera
-        ui.flipBtn.animate().rotationBy(180f).setDuration(250).start()
         bindCamera()
     }
 
@@ -690,7 +695,7 @@ class MainActivity : AppCompatActivity() {
         }
         tile.setOnClickListener {
             if (key == KEY_ADD) {
-                pickBackdrop.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                if (!busy()) pickBackdrop.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
             } else {
                 settings.backdrop = key
                 applyBackdropSelection()
@@ -857,6 +862,7 @@ class MainActivity : AppCompatActivity() {
     private fun startCountdown(seconds: Int) {
         val spoken = settings.handsFree
         val tone = if (spoken) null else runCatching { ToneGenerator(AudioManager.STREAM_MUSIC, 70) }.getOrNull()
+        countdownTone = tone
         ui.countdownText.visibility = View.VISIBLE
         setShutter(true)
         countdown = object : CountDownTimer(seconds * 1000L, 1000L) {
@@ -871,6 +877,7 @@ class MainActivity : AppCompatActivity() {
 
             override fun onFinish() {
                 tone?.release()
+                countdownTone = null
                 countdown = null
                 ui.countdownText.visibility = View.GONE
                 startRecording()
@@ -882,6 +889,8 @@ class MainActivity : AppCompatActivity() {
         if (countdown == null) return
         countdown?.cancel()
         countdown = null
+        countdownTone?.release()
+        countdownTone = null
         ui.countdownText.visibility = View.GONE
         if (recorder == null) setShutter(false)
         if (announce && settings.handsFree) speak("Cancelled.")
@@ -969,6 +978,7 @@ class MainActivity : AppCompatActivity() {
         val rec = recorder ?: return
         if (rec.paused) {
             rec.resume()
+            voice.reset() // word timings restart with the resumed recording clock
             recDotBlink?.resume()
             if (ui.teleBox.visibility == View.VISIBLE) teleRunning = true
             ui.pauseBtn.setImageResource(R.drawable.ic_pause)
@@ -1033,7 +1043,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun setControlsEnabled(enabled: Boolean) {
         val alpha = if (enabled) 1f else 0.35f
-        for (v in listOf(ui.settingsBtn, ui.lastThumb, ui.zoomRow, ui.stripScroll)) {
+        for (v in listOf(ui.settingsBtn, ui.lastThumb, ui.zoomRow)) {
             v.isEnabled = enabled
             v.alpha = alpha
         }
@@ -1056,7 +1066,9 @@ class MainActivity : AppCompatActivity() {
         ui.timerChip.setCompoundDrawablesRelativeWithIntrinsicBounds(
             if (t == 0) R.drawable.ic_timer_off else R.drawable.ic_timer, 0, 0, 0
         )
-        ui.timerChip.setTextColor(if (t == 0) 0xFFFFFFFF.toInt() else ContextCompat.getColor(this, R.color.accent))
+        val color = if (t == 0) 0xFFFFFFFF.toInt() else ContextCompat.getColor(this, R.color.accent)
+        ui.timerChip.setTextColor(color)
+        TextViewCompat.setCompoundDrawableTintList(ui.timerChip, ColorStateList.valueOf(color))
     }
 
     // ================================================================== microphone
@@ -1274,10 +1286,26 @@ class MainActivity : AppCompatActivity() {
         if (on) {
             hint("Hands-free on: say “start” to record, “stop” to finish")
             speak("Hands-free on. I will guide you into the frame. Say start to record, and say stop to finish.")
+            loadVoice()
         } else {
-            voice.stop()
-            hint("Hands-free off")
             speaker.stop()
+            voice.unload()
+            hint("Hands-free off")
+        }
+    }
+
+    /** Loads the offline speech model (about 100 MB of memory), so only while hands-free is on. */
+    private fun loadVoice() {
+        if (voice.available) return
+        if (!File(filesDir, "vosk-en").exists()) hint("Preparing voice commands, this takes a moment the first time")
+        voice.load { ok ->
+            main.post {
+                when {
+                    !settings.handsFree -> voice.unload() // switched off again while loading
+                    !ok -> hint("Voice commands could not start. Guidance still works.")
+                    else -> startListening()
+                }
+            }
         }
     }
 
@@ -1285,19 +1313,15 @@ class MainActivity : AppCompatActivity() {
 
     /**
      * Says [text] out loud. Keyword listening ignores what is heard while the phone speaks, so it
-     * can never react to its own "say start".
+     * can never react to its own "say start"; [Speaker.onIdle] lifts the mute afterwards.
      */
     private fun speak(text: String, done: (() -> Unit)? = null) {
         voice.mutedUntil = Long.MAX_VALUE
-        speaker.say(text) {
-            voice.mutedUntil = System.currentTimeMillis() + 700
-            done?.invoke()
-            startListening()
-        }
+        speaker.say(text, done)
     }
 
     private fun startListening() {
-        if (settings.handsFree && recorder == null && micMonitor == null && !isFinishing) voice.start()
+        if (foreground && settings.handsFree && recorder == null && micMonitor == null) voice.start()
     }
 
     /** "start"/"action" while idle; "stop"/"cut" while recording or counting down. */
@@ -1305,7 +1329,9 @@ class MainActivity : AppCompatActivity() {
         if (!settings.handsFree) return
         if (word in KeywordSpotter.START_WORDS) {
             if (recorder == null && countdown == null) {
-                speak("Okay. Recording in") { if (recorder == null && countdown == null) startCountdown(3) }
+                speak("Okay. Recording in") {
+                    if (recorder == null && countdown == null) startCountdown(max(settings.timer, 3))
+                }
             }
         } else if (word in KeywordSpotter.STOP_WORDS) {
             val rec = recorder
@@ -1473,10 +1499,10 @@ class MainActivity : AppCompatActivity() {
             270 -> 90f
             else -> 0f
         }
+        // Icons and tiles turn; text (chips, timer pill, hints) stays readable in place.
         val views = mutableListOf<View>(
-            ui.settingsBtn, ui.flashBtn, ui.aspectChip, ui.qualityChip, ui.timerChip,
-            ui.micBtn, ui.handsBtn, ui.tuneBtn, ui.teleBtn,
-            ui.pauseBtn, ui.lastThumb, ui.countdownText, ui.recPill
+            ui.settingsBtn, ui.flashBtn, ui.micBtn, ui.handsBtn, ui.tuneBtn, ui.teleBtn,
+            ui.pauseBtn, ui.flipBtn, ui.lastThumb, ui.countdownText
         )
         for (i in 0 until ui.zoomRow.childCount) views += ui.zoomRow.getChildAt(i)
         for (i in 0 until ui.backdropStrip.childCount) views += ui.backdropStrip.getChildAt(i)

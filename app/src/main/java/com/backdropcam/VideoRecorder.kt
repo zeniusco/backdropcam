@@ -63,8 +63,15 @@ class VideoRecorder(
         if (paused) {
             pauseOffsetNs += System.nanoTime() - pausedAtNs
             paused = false
+            audioResync = true
         }
     }
+
+    // Audio timestamps come from the sample count (smooth), re-based on the clock at start and
+    // after every pause.
+    @Volatile private var audioResync = true
+    private var audioBaseUs = 0L
+    private var audioSamples = 0L
 
     /** Recording clock in ns: stops while paused, so the video has no gap. */
     fun ptsNs(): Long = (if (paused) pausedAtNs else System.nanoTime()) - startNs - pauseOffsetNs
@@ -243,7 +250,13 @@ class VideoRecorder(
                         if (audioRunning) {
                             val n = rec.read(pcm, 0, minOf(pcm.size, buf.remaining() / 2))
                             if (n > 0) {
-                                val ptsUs = nowUs - n * 1_000_000L / SAMPLE_RATE
+                                if (audioResync) {
+                                    audioBaseUs = nowUs - n * 1_000_000L / SAMPLE_RATE
+                                    audioSamples = 0
+                                    audioResync = false
+                                }
+                                val ptsUs = audioBaseUs + audioSamples * 1_000_000L / SAMPLE_RATE
+                                audioSamples += n
                                 onPcm?.invoke(pcm, n, ptsUs) // raw audio, before gain and mute
                                 val level = AudioLevel.process(pcm, n, gain(), muted())
                                 val now = System.currentTimeMillis()

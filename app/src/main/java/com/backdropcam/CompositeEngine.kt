@@ -177,12 +177,16 @@ class CompositeEngine(context: Context) {
 
     /** Swaps the segmentation model. The old one is closed on the segmentation thread. */
     fun setSegmenter(newSegmenter: PersonSegmenter) {
-        segExecutor.execute {
-            val old = segmenter
-            segmenter = newSegmenter
-            old?.close()
+        try {
+            segExecutor.execute {
+                val old = segmenter
+                segmenter = newSegmenter
+                old?.close()
+            }
+            handler.post { invalidateMask() }
+        } catch (e: java.util.concurrent.RejectedExecutionException) {
+            newSegmenter.close() // the engine was released meanwhile
         }
-        handler.post { invalidateMask() }
     }
 
     fun setMode(newMode: Int) {

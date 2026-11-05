@@ -35,41 +35,52 @@ class Speaker(context: Context) {
             tts.setSpeechRate(1.05f)
             tts.setAudioAttributes(
                 AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
+                    .setUsage(AudioAttributes.USAGE_ASSISTANT)
                     .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                     .build()
             )
         }
     }
 
+    /**
+     * Runs on the main thread whenever the phone stops talking, for any reason: finished,
+     * interrupted by a newer sentence, stopped, or failed. Use it for "listening again" logic.
+     */
+    var onIdle: (() -> Unit)? = null
+
     init {
         tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(id: String) {}
-            override fun onDone(id: String) {
-                val cb = synchronized(pending) { pending.remove(id) } ?: return
-                main.post(cb)
-            }
+            override fun onDone(id: String) = finished(id, completed = true)
+            override fun onStop(id: String, interrupted: Boolean) = finished(id, completed = false)
             @Deprecated("Deprecated in Java")
-            override fun onError(id: String) = onDone(id)
+            override fun onError(id: String) = finished(id, completed = false)
         })
+    }
+
+    private fun finished(id: String, completed: Boolean) {
+        val cb = synchronized(pending) { pending.remove(id) }
+        main.post {
+            if (completed) cb?.invoke()
+            onIdle?.invoke()
+        }
     }
 
     val isSpeaking: Boolean get() = ready && tts.isSpeaking
 
-    /** Speaks [text], interrupting anything already being said. [done] runs when finished. */
+    /** Speaks [text], interrupting anything already being said. [done] runs only if it finished. */
     fun say(text: String, done: (() -> Unit)? = null) {
-        if (!ready) {
-            done?.let { main.postDelayed(it, 600) }
-            return
-        }
         val id = "u${counter++}"
         if (done != null) synchronized(pending) { pending[id] = done }
-        tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, id)
+        val queued = ready && tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, id) == TextToSpeech.SUCCESS
+        // No speech engine, or it refused: behave as if the sentence was said at once.
+        if (!queued) main.postDelayed({ finished(id, completed = true) }, 500)
     }
 
     fun stop() {
         if (ready) tts.stop()
         synchronized(pending) { pending.clear() }
+        main.post { onIdle?.invoke() }
     }
 
     fun shutdown() {
@@ -157,8 +168,12 @@ class KeywordSpotter(context: Context, private val onWord: (word: String, atUs: 
 
     val available: Boolean get() = model != null
 
-    /** Unpacks and loads the speech model in the background (first launch takes a few seconds). */
+    @Volatile private var loading = false
+
+    /** Unpacks and loads the speech model in the background (first time takes a few seconds). */
     fun load(onReady: (Boolean) -> Unit) {
+        if (loading || model != null) return
+        loading = true
         Thread({
             val ok = try {
                 LibVosk.setLogLevel(LogLevel.WARNINGS)
@@ -170,8 +185,20 @@ class KeywordSpotter(context: Context, private val onWord: (word: String, atUs: 
                 Log.e("KeywordSpotter", "speech model failed to load", t)
                 false
             }
+            loading = false
             onReady(ok)
         }, "vosk-load").start()
+    }
+
+    /** Frees the model's memory (about 100 MB). [load] brings it back. */
+    fun unload() {
+        stop()
+        synchronized(lock) {
+            recognizer?.close()
+            recognizer = null
+            model?.close()
+            model = null
+        }
     }
 
     private fun unpackModel(): File {
@@ -221,14 +248,14 @@ class KeywordSpotter(context: Context, private val onWord: (word: String, atUs: 
     private fun handle(json: String) {
         if (System.currentTimeMillis() < mutedUntil) return
         val words = runCatching { JSONObject(json).optJSONArray("result") }.getOrNull() ?: return
-        for (k in 0 until words.length()) {
-            val w = words.getJSONObject(k)
-            val word = w.optString("word")
-            if (word !in KEYWORDS || w.optDouble("conf", 1.0) < 0.6) continue
-            val atUs = streamStartUs + (w.optDouble("start", 0.0) * 1_000_000).toLong()
-            onWord(word, atUs)
-            return
-        }
+        // Only a keyword said on its own counts, so "let's cut costs" inside a sentence does not
+        // end the recording. The grammar maps other speech to [unk], which makes it a longer list.
+        if (words.length() != 1) return
+        val w = words.getJSONObject(0)
+        val word = w.optString("word")
+        if (word !in KEYWORDS || w.optDouble("conf", 1.0) < 0.6) return
+        val atUs = streamStartUs + (w.optDouble("start", 0.0) * 1_000_000).toLong()
+        onWord(word, atUs)
     }
 
     /** Listens to the microphone (idle mode). Call [stop] before recording starts. */
@@ -269,15 +296,7 @@ class KeywordSpotter(context: Context, private val onWord: (word: String, atUs: 
         listenThread = null
     }
 
-    fun close() {
-        stop()
-        synchronized(lock) {
-            recognizer?.close()
-            recognizer = null
-        }
-        model?.close()
-        model = null
-    }
+    fun close() = unload()
 
     companion object {
         private const val MODEL_DIR = "vosk-en"
