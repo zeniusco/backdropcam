@@ -13,6 +13,8 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1"
+        // Phones only (keeps the app smaller than also shipping emulator x86 code)
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
     }
 
     signingConfigs {
@@ -35,7 +37,7 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { viewBinding = true }
-    androidResources { noCompress += "tflite" }
+    androidResources { noCompress += listOf("tflite") }
 }
 
 dependencies {
@@ -56,4 +58,8 @@ dependencies {
     // Google Drive upload (OAuth token via Identity Authorization API, upload via REST)
     implementation("com.google.android.gms:play-services-auth:21.3.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    // Offline, always-on keyword listening ("start", "stop") without system beeps
+    implementation("com.alphacephei:vosk-android:0.3.47")
+    implementation("net.java.dev.jna:jna:5.13.0@aar")
 }

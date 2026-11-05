@@ -117,7 +117,7 @@ class MainActivity : AppCompatActivity() {
     // Hands-free mode
     private lateinit var speaker: Speaker
     private lateinit var coach: FramingCoach
-    private lateinit var voice: VoiceCommands
+    private lateinit var voice: KeywordSpotter
 
     @Volatile private var micGain = 1f
     @Volatile private var micMuted = false
@@ -180,7 +180,13 @@ class MainActivity : AppCompatActivity() {
         engine.onGeometry = { w, h -> onCameraGeometry(w, h) }
         speaker = Speaker(this)
         coach = FramingCoach { speak(it) }
-        voice = VoiceCommands(this) { onVoiceStart() }
+        voice = KeywordSpotter(this) { word, atUs -> main.post { onKeyword(word, atUs) } }
+        voice.load { ok ->
+            main.post {
+                if (!ok && settings.handsFree) toast("Voice commands could not start; guidance still works")
+                startListening()
+            }
+        }
         engine.framingWanted = settings.handsFree
         engine.onFraming = { f ->
             lastFraming = f
@@ -289,7 +295,7 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         main.removeCallbacks(teleTick)
-        voice.stop()
+        voice.close()
         speaker.shutdown()
         engine.release()
         io.shutdown()
@@ -834,7 +840,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startCountdown(seconds: Int) {
-        voice.stop()
         val spoken = settings.handsFree
         val tone = if (spoken) null else runCatching { ToneGenerator(AudioManager.STREAM_MUSIC, 70) }.getOrNull()
         ui.countdownText.visibility = View.VISIBLE
@@ -875,7 +880,9 @@ class MainActivity : AppCompatActivity() {
         val size = VideoRecorder.pickEncoderSize(ww, wh)
         val audio = settings.micOn && granted(Manifest.permission.RECORD_AUDIO)
         micMonitor?.stop(); micMonitor = null
-        voice.stop()
+        voice.stop() // release the microphone for the recorder
+        voice.reset()
+        voice.mutedUntil = 0L
         speaker.stop()
         micMuted = false
         var recRef: VideoRecorder? = null
@@ -893,7 +900,10 @@ class MainActivity : AppCompatActivity() {
                 gain = { micGain },
                 muted = { micMuted },
                 onLevel = { level -> main.post { ui.levelBar.progress = (level * 100).toInt() } },
-                onPcm = clap?.let { c -> { pcm: ShortArray, n: Int, t: Long -> c.feed(pcm, n, t) } },
+                onPcm = if (settings.handsFree && audio) { pcm: ShortArray, n: Int, t: Long ->
+                    clap?.feed(pcm, n, t)
+                    voice.feed48k(pcm, n, t) // "stop" / "cut" while recording
+                } else null,
             )
             recRef = rec
             rec.start()
@@ -1280,9 +1290,9 @@ class MainActivity : AppCompatActivity() {
         updateHandsFreeUi()
         coach.reset()
         if (on) {
-            if (!voice.available) toast("Voice commands are not available on this phone; guidance still works")
+            if (!voice.available) toast("Voice commands are still loading; guidance works already")
             if (announce) {
-                speak("Hands-free on. I will guide you into the frame. Say start to record, and clap twice to stop.") {
+                speak("Hands-free on. I will guide you into the frame. Say start to record, and say stop to finish.") {
                     startListening()
                 }
             } else startListening()
@@ -1303,15 +1313,34 @@ class MainActivity : AppCompatActivity() {
      * hear its own "say start" and trigger itself; it resumes shortly after.
      */
     private fun speak(text: String, done: (() -> Unit)? = null) {
-        voice.stop()
+        voice.mutedUntil = Long.MAX_VALUE
         speaker.say(text) {
+            voice.mutedUntil = System.currentTimeMillis() + 700
             done?.invoke()
-            main.postDelayed({ startListening() }, 700)
+            startListening()
         }
     }
 
     private fun startListening() {
-        if (settings.handsFree && recorder == null && countdown == null && !isFinishing) voice.start()
+        if (settings.handsFree && recorder == null && !isFinishing) voice.start()
+    }
+
+    /** A keyword was heard: "start"/"action" while idle, "stop"/"cut" while recording or counting down. */
+    private fun onKeyword(word: String, atUs: Long) {
+        if (!settings.handsFree) return
+        if (word in KeywordSpotter.START_WORDS) {
+            if (recorder == null && countdown == null) onVoiceStart()
+        } else if (word in KeywordSpotter.STOP_WORDS) {
+            val rec = recorder
+            when {
+                rec != null -> {
+                    // Cut the video just before the word, so "stop" is not in it.
+                    rec.cutoffUs = max(0L, atUs - 250_000L)
+                    stopRecording()
+                }
+                countdown != null -> cancelCountdown()
+            }
+        }
     }
 
     private fun onVoiceStart() {

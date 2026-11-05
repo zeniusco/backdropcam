@@ -1,18 +1,25 @@
 package com.backdropcam
 
+import android.annotation.SuppressLint
 import android.content.Context
-import android.content.Intent
 import android.media.AudioAttributes
-import android.os.Bundle
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
 import android.os.Handler
 import android.os.Looper
-import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.util.Log
+import org.json.JSONObject
+import org.vosk.LibVosk
+import org.vosk.LogLevel
+import org.vosk.Model
+import org.vosk.Recognizer
+import java.io.File
 import java.util.Locale
 import kotlin.math.abs
+import kotlin.math.max
 import kotlin.math.sqrt
 
 /** Speaks short prompts out loud through the phone speaker. */
@@ -82,8 +89,10 @@ class FramingCoach(private val speak: (String) -> Unit) {
     private var since = 0L
     private var lastSpoken: String? = null
     private var lastSpokenAt = 0L
+    private var repeats = 0
 
     fun reset() {
+        repeats = 0
         current = null
         lastSpoken = null
     }
@@ -97,8 +106,10 @@ class FramingCoach(private val speak: (String) -> Unit) {
             return
         }
         if (now - since < 900) return
-        val repeatAfter = if (advice == PERFECT) Long.MAX_VALUE else 7000L
-        if (advice != lastSpoken || now - lastSpokenAt > repeatAfter) {
+        val repeatAfter = if (advice == PERFECT) Long.MAX_VALUE else 15000L
+        if (advice != lastSpoken) repeats = 0
+        if ((advice != lastSpoken || now - lastSpokenAt > repeatAfter) && repeats < 2) {
+            if (advice == lastSpoken) repeats++
             lastSpoken = advice
             lastSpokenAt = now
             speak(advice)
@@ -127,89 +138,156 @@ class FramingCoach(private val speak: (String) -> Unit) {
 }
 
 /**
- * Listens for "start" (or "record", "action") while the app is idle and calls [onStart].
- * Uses Android's speech recogniser, preferring the offline model.
+ * Always-on, offline keyword listening with Vosk (no system beeps, no restart loops).
+ *
+ * While idle it listens to the microphone itself. While recording, the recorder hands it the
+ * recording's own audio ([feed48k]), so "stop" works without fighting over the microphone.
+ * Only a handful of words are recognised, which keeps it fast and avoids false triggers.
  */
-class VoiceCommands(private val context: Context, private val onStart: () -> Unit) {
-    private val main = Handler(Looper.getMainLooper())
-    private var recognizer: SpeechRecognizer? = null
-    private var active = false
-    private var listeningSince = 0L
+class KeywordSpotter(context: Context, private val onWord: (word: String, atUs: Long) -> Unit) {
+    private val appContext = context.applicationContext
+    private val lock = Any()
+    @Volatile private var model: Model? = null
+    private var recognizer: Recognizer? = null
+    private var streamStartUs = -1L
+    private var listenThread: Thread? = null
+    @Volatile private var listening = false
+    private val down = ShortArray(8192)
 
-    val available: Boolean get() = SpeechRecognizer.isRecognitionAvailable(context)
+    /** Words heard before this time (ms) are ignored, e.g. while the phone itself is talking. */
+    @Volatile var mutedUntil = 0L
 
+    val available: Boolean get() = model != null
+
+    /** Unpacks and loads the speech model in the background (first launch takes a few seconds). */
+    fun load(onReady: (Boolean) -> Unit) {
+        Thread({
+            val ok = try {
+                LibVosk.setLogLevel(LogLevel.WARNINGS)
+                val dir = unpackModel()
+                model = Model(dir.absolutePath)
+                reset()
+                true
+            } catch (t: Throwable) {
+                Log.e("KeywordSpotter", "speech model failed to load", t)
+                false
+            }
+            onReady(ok)
+        }, "vosk-load").start()
+    }
+
+    private fun unpackModel(): File {
+        val dir = File(appContext.filesDir, MODEL_DIR)
+        val marker = File(dir, ".ready-$MODEL_VERSION")
+        if (marker.exists()) return dir
+        dir.deleteRecursively()
+        val files = appContext.assets.open("$MODEL_DIR.files").bufferedReader().readLines().filter { it.isNotBlank() }
+        for (path in files) {
+            val out = File(appContext.filesDir, path)
+            out.parentFile?.mkdirs()
+            appContext.assets.open(path).use { input -> out.outputStream().use { input.copyTo(it) } }
+        }
+        marker.createNewFile()
+        return dir
+    }
+
+    /** Starts a fresh audio stream (word times are measured from the next fed sample). */
+    fun reset() {
+        synchronized(lock) {
+            recognizer?.close()
+            recognizer = model?.let { Recognizer(it, 16000f, GRAMMAR).apply { setWords(true) } }
+            streamStartUs = -1L
+        }
+    }
+
+    /** Feeds 16 kHz mono audio. [startUs] is the time of the first sample (any clock). */
+    fun feed16k(pcm: ShortArray, n: Int, startUs: Long) {
+        synchronized(lock) {
+            val r = recognizer ?: return
+            if (streamStartUs < 0) streamStartUs = startUs
+            if (r.acceptWaveForm(pcm, n)) handle(r.result)
+        }
+    }
+
+    /** Feeds 48 kHz mono audio from the recorder (down-sampled by 3). */
+    fun feed48k(pcm: ShortArray, n: Int, startUs: Long) {
+        var j = 0
+        var i = 0
+        while (i + 2 < n && j < down.size) {
+            down[j++] = ((pcm[i] + pcm[i + 1] + pcm[i + 2]) / 3).toShort()
+            i += 3
+        }
+        feed16k(down, j, startUs)
+    }
+
+    private fun handle(json: String) {
+        if (System.currentTimeMillis() < mutedUntil) return
+        val words = runCatching { JSONObject(json).optJSONArray("result") }.getOrNull() ?: return
+        for (k in 0 until words.length()) {
+            val w = words.getJSONObject(k)
+            val word = w.optString("word")
+            if (word !in KEYWORDS || w.optDouble("conf", 1.0) < 0.6) continue
+            val atUs = streamStartUs + (w.optDouble("start", 0.0) * 1_000_000).toLong()
+            onWord(word, atUs)
+            return
+        }
+    }
+
+    /** Listens to the microphone (idle mode). Call [stop] before recording starts. */
+    @SuppressLint("MissingPermission")
     fun start() {
-        if (active || !available) return
-        active = true
-        listeningSince = System.currentTimeMillis()
-        listen()
+        if (listening || model == null) return
+        listening = true
+        reset()
+        listenThread = Thread({
+            val minBuf = AudioRecord.getMinBufferSize(16000, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+            val rec = try {
+                AudioRecord(
+                    MediaRecorder.AudioSource.VOICE_RECOGNITION, 16000, AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT, max(minBuf * 2, 8192)
+                )
+            } catch (e: Exception) {
+                null
+            }
+            if (rec == null || rec.state != AudioRecord.STATE_INITIALIZED) {
+                rec?.release()
+                listening = false
+                return@Thread
+            }
+            val buf = ShortArray(1600)
+            rec.startRecording()
+            while (listening) {
+                val n = rec.read(buf, 0, buf.size)
+                if (n > 0) feed16k(buf, n, System.nanoTime() / 1000)
+            }
+            runCatching { rec.stop() }
+            rec.release()
+        }, "keyword-listen").also { it.start() }
     }
 
     fun stop() {
-        active = false
-        main.removeCallbacksAndMessages(null)
-        recognizer?.run {
-            runCatching { cancel() }
-            destroy()
-        }
-        recognizer = null
+        listening = false
+        listenThread?.join(800)
+        listenThread = null
     }
 
-    private fun listen() {
-        if (!active) return
-        val r = recognizer ?: SpeechRecognizer.createSpeechRecognizer(context).also {
-            it.setRecognitionListener(listener)
-            recognizer = it
-        }
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
-        }
-        runCatching { r.startListening(intent) }.onFailure { retry(1500) }
-    }
-
-    private fun retry(delayMs: Long) {
-        if (!active) return
-        main.postDelayed({ listen() }, delayMs)
-    }
-
-    private fun matches(results: Bundle?): Boolean {
-        // Ignore anything heard right after listening started (echo of the phone's own voice).
-        if (System.currentTimeMillis() - listeningSince < 900) return false
-        val list = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION) ?: return false
-        return list.any { phrase ->
-            phrase.lowercase(Locale.ROOT).split(Regex("[^a-z]+")).any { it in START_WORDS }
-        }
-    }
-
-    private fun fire() {
+    fun close() {
         stop()
-        onStart()
-    }
-
-    private val listener = object : RecognitionListener {
-        override fun onReadyForSpeech(params: Bundle?) {}
-        override fun onBeginningOfSpeech() {}
-        override fun onRmsChanged(rmsdB: Float) {}
-        override fun onBufferReceived(buffer: ByteArray?) {}
-        override fun onEndOfSpeech() {}
-        override fun onEvent(eventType: Int, params: Bundle?) {}
-        override fun onPartialResults(partialResults: Bundle?) {
-            if (active && matches(partialResults)) fire()
+        synchronized(lock) {
+            recognizer?.close()
+            recognizer = null
         }
-        override fun onResults(results: Bundle?) {
-            if (!active) return
-            if (matches(results)) fire() else retry(150)
-        }
-        override fun onError(error: Int) {
-            retry(if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) 1200 else 300)
-        }
+        model?.close()
+        model = null
     }
 
     companion object {
-        private val START_WORDS = setOf("start", "action", "record", "begin", "go")
+        private const val MODEL_DIR = "vosk-en"
+        private const val MODEL_VERSION = 1
+        val START_WORDS = setOf("start", "action")
+        val STOP_WORDS = setOf("stop", "cut")
+        private val KEYWORDS = START_WORDS + STOP_WORDS
+        private const val GRAMMAR = "[\"start\", \"action\", \"stop\", \"cut\", \"[unk]\"]"
     }
 }
 
