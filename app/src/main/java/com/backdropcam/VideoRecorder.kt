@@ -47,6 +47,28 @@ class VideoRecorder(
     private val onPcm: ((ShortArray, Int, Long) -> Unit)? = null,
     private val fps: Int = 30,
 ) {
+    @Volatile var paused = false
+        private set
+    @Volatile private var pausedAtNs = 0L
+    @Volatile private var pauseOffsetNs = 0L
+
+    fun pause() {
+        if (!paused) {
+            pausedAtNs = System.nanoTime()
+            paused = true
+        }
+    }
+
+    fun resume() {
+        if (paused) {
+            pauseOffsetNs += System.nanoTime() - pausedAtNs
+            paused = false
+        }
+    }
+
+    /** Recording clock in ns: stops while paused, so the video has no gap. */
+    fun ptsNs(): Long = (if (paused) pausedAtNs else System.nanoTime()) - startNs - pauseOffsetNs
+
     /** Samples after this time (us) are dropped, e.g. to cut the claps used to stop recording. */
     @Volatile var cutoffUs = Long.MAX_VALUE
 
@@ -210,12 +232,14 @@ class VideoRecorder(
             var inputDone = false
             var outputDone = false
             while (!outputDone) {
-                if (!inputDone) {
+                if (!inputDone && paused && audioRunning) {
+                    rec.read(pcm, 0, pcm.size) // keep draining the mic, but drop the audio
+                } else if (!inputDone) {
                     val idx = codec.dequeueInputBuffer(10_000)
                     if (idx >= 0) {
                         val buf = codec.getInputBuffer(idx)!!
                         buf.clear()
-                        val nowUs = (System.nanoTime() - startNs) / 1000
+                        val nowUs = ptsNs() / 1000
                         if (audioRunning) {
                             val n = rec.read(pcm, 0, minOf(pcm.size, buf.remaining() / 2))
                             if (n > 0) {

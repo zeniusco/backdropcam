@@ -88,7 +88,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="4dp"
-            android:text="Start zoomed out (widest view)" />
+            android:text="Use the ultra-wide 0.6x lens (zoomed out) when available" />
 
         <com.google.android.material.materialswitch.MaterialSwitch
             android:id="@+id/handsFreeSwitch"

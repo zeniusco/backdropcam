@@ -81,6 +81,21 @@
             android:layout_weight="1" />
 
         <TextView
+            android:id="@+id/aspectChip"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="8dp"
+            android:background="@drawable/bg_pill_dark"
+            android:paddingStart="12dp"
+            android:paddingTop="8dp"
+            android:paddingEnd="12dp"
+            android:paddingBottom="8dp"
+            android:text="FULL"
+            android:textColor="@android:color/white"
+            android:textSize="13sp"
+            android:textStyle="bold" />
+
+        <TextView
             android:id="@+id/qualityChip"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
@@ -226,6 +241,18 @@
                     android:layout_gravity="center"
                     android:background="@drawable/shutter_idle" />
             </FrameLayout>
+
+            <ImageButton
+                android:id="@+id/pauseBtn"
+                style="@style/RoundIcon"
+                android:layout_width="52dp"
+                android:layout_height="52dp"
+                android:layout_gravity="end|center_vertical"
+                android:layout_marginEnd="36dp"
+                android:padding="12dp"
+                android:contentDescription="Pause or resume"
+                android:src="@drawable/ic_pause"
+                android:visibility="gone" />
 
             <ImageButton
                 android:id="@+id/flipBtn"

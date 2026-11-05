@@ -64,6 +64,11 @@ class AppSettings(context: Context) {
         get() = p.getBoolean("wideStart", true)
         set(v) = p.edit().putBoolean("wideStart", v).apply()
 
+    /** Fill the whole (tall) screen; the video is cropped to the screen's shape. */
+    var fullScreen: Boolean
+        get() = p.getBoolean("fullScreen", true)
+        set(v) = p.edit().putBoolean("fullScreen", v).apply()
+
     val qualityCap: Int
         get() = when (quality) {
             "1080" -> 1920

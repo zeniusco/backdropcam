@@ -37,7 +37,10 @@ import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
+import androidx.camera.core.CameraInfo
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.Preview
@@ -51,6 +54,11 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import android.hardware.camera2.CameraCharacteristics
+import kotlin.math.atan
+import kotlin.math.roundToInt
+import kotlin.math.tan
 import androidx.core.view.updatePadding
 import com.backdropcam.databinding.ActivityMainBinding
 import com.backdropcam.databinding.SheetMicBinding
@@ -84,8 +92,12 @@ class MainActivity : AppCompatActivity() {
     private var countdown: CountDownTimer? = null
     private var deviceRotation = 0
     private var torchOn = false
-    private var zoomStops: List<Float> = emptyList()
     private var pendingWideZoom = false
+    private var wideCam: Pair<CameraInfo, Float>? = null
+    private var usingWideCam = false
+    private var noWideToastShown = false
+    private var cropX = 1f
+    private var cropY = 1f
 
     // Hands-free mode
     private lateinit var speaker: Speaker
@@ -149,8 +161,16 @@ class MainActivity : AppCompatActivity() {
         applyEngineOptions()
         loadSegmenter()
 
+        // Full-screen camera: hide the status and navigation bars (swipe from an edge to show them).
+        WindowInsetsControllerCompat(window, ui.root).apply {
+            hide(WindowInsetsCompat.Type.systemBars())
+            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
+        ui.root.addOnLayoutChangeListener { _, l, t, r, b, ol, ot, or, ob ->
+            if (r - l != or - ol || b - t != ob - ot) applyCrop()
+        }
         ViewCompat.setOnApplyWindowInsetsListener(ui.root) { _, insets ->
-            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
             ui.topBar.updatePadding(top = bars.top + dp(8))
             ui.bottomArea.updatePadding(bottom = bars.bottom + dp(8))
             insets
@@ -173,6 +193,8 @@ class MainActivity : AppCompatActivity() {
         ui.handsBtn.setOnClickListener { setHandsFree(!settings.handsFree, announce = true) }
         ui.timerBtn.setOnClickListener { cycleTimer() }
         ui.qualityChip.setOnClickListener { cycleQuality() }
+        ui.aspectChip.setOnClickListener { toggleFullScreen() }
+        ui.pauseBtn.setOnClickListener { togglePause() }
         ui.flipBtn.setOnClickListener { flipCamera() }
         ui.recordBtn.setOnClickListener { onRecordPressed() }
         ui.lastThumb.setOnClickListener { lastVideo?.let { showResultSheet(it) } ?: toast("No recordings yet") }
@@ -180,6 +202,7 @@ class MainActivity : AppCompatActivity() {
         updateMicIcon()
         updateTimerUi()
         updateHandsFreeUi()
+        ui.aspectChip.text = if (settings.fullScreen) "FULL" else "16:9"
         buildBackdropStrip()
         applyBackdropSelection()
         lastVideo?.let { loadThumbInto(it, ui.lastThumb) }
@@ -254,7 +277,17 @@ class MainActivity : AppCompatActivity() {
             val provider = future.get()
             provider.unbindAll()
             val front = settings.frontCamera
-            val selector = if (front) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
+            wideCam = if (front) null else runCatching { findUltraWide(provider.availableCameraInfos) }.getOrNull()
+            val wide = wideCam
+            usingWideCam = !front && settings.wideStart && wide != null
+            val selector = when {
+                front -> CameraSelector.DEFAULT_FRONT_CAMERA
+                usingWideCam && wide != null -> {
+                    val id = cameraId(wide.first)
+                    CameraSelector.Builder().addCameraFilter { list -> list.filter { cameraId(it) == id } }.build()
+                }
+                else -> CameraSelector.DEFAULT_BACK_CAMERA
+            }
             val info = runCatching { selector.filter(provider.availableCameraInfos).firstOrNull() }.getOrNull()
             if (info == null) {
                 if (front) {
@@ -297,8 +330,7 @@ class MainActivity : AppCompatActivity() {
             .build()
 
     private fun onCameraGeometry(w: Int, h: Int) {
-        (ui.surface.layoutParams as ConstraintLayout.LayoutParams).dimensionRatio = "$w:$h"
-        ui.surface.requestLayout()
+        applyCrop()
         val longSide = max(w, h)
         ui.qualityChip.text = when {
             longSide >= 3840 -> "4K"
@@ -314,54 +346,124 @@ class MainActivity : AppCompatActivity() {
         ui.flashBtn.visibility = if (cam.cameraInfo.hasFlashUnit()) View.VISIBLE else View.GONE
         ui.flashBtn.setImageResource(R.drawable.ic_flash_off)
         ui.zoomRow.removeAllViews()
-        zoomStops = emptyList()
-        pendingWideZoom = settings.wideStart
+        pendingWideZoom = false
+
+        if (!settings.frontCamera) {
+            val wc = wideCam
+            if (wc != null) {
+                // Separate ultra-wide camera: switching lens means re-opening the camera.
+                addLensChip(zoomLabel(wc.second), usingWideCam) {
+                    if (!usingWideCam && !busy()) { settings.wideStart = true; bindCamera() }
+                }
+                addLensChip("1x", !usingWideCam) {
+                    if (usingWideCam && !busy()) { settings.wideStart = false; bindCamera() }
+                }
+            } else {
+                pendingWideZoom = true // maybe the main camera itself can zoom out; check below
+            }
+        }
 
         cam.cameraInfo.zoomState.removeObservers(this)
         cam.cameraInfo.zoomState.observe(this) { zs ->
-            if (camera !== cam) return@observe
-            if (zoomStops.isEmpty()) buildZoomChips(cam, zs.minZoomRatio, zs.maxZoomRatio)
-            if (pendingWideZoom) {
-                pendingWideZoom = false
-                if (zs.minZoomRatio < 0.99f) cam.cameraControl.setZoomRatio(zs.minZoomRatio)
-            }
-            val current = zoomStops
-            for (i in 0 until ui.zoomRow.childCount) {
-                val tv = ui.zoomRow.getChildAt(i) as? TextView ?: continue
-                val z = current.getOrNull(i) ?: continue
-                val next = current.getOrNull(i + 1) ?: Float.MAX_VALUE
-                val active = zs.zoomRatio >= z - 0.05f && zs.zoomRatio < next - 0.05f
-                tv.setTextColor(if (active) 0xFFFFD54F.toInt() else 0xFFFFFFFF.toInt())
-                tv.text = if (active && abs(zs.zoomRatio - z) > 0.05f) String.format("%.1fx", zs.zoomRatio) else zoomLabel(z)
+            if (camera !== cam || !pendingWideZoom) return@observe
+            pendingWideZoom = false
+            val min = zs.minZoomRatio
+            if (min < 0.95f) {
+                if (settings.wideStart) cam.cameraControl.setZoomRatio(min)
+                addLensChip(zoomLabel(min), settings.wideStart) {
+                    settings.wideStart = true
+                    cam.cameraControl.setZoomRatio(min)
+                    highlightLens(0)
+                }
+                addLensChip("1x", !settings.wideStart) {
+                    settings.wideStart = false
+                    cam.cameraControl.setZoomRatio(1f)
+                    highlightLens(1)
+                }
+            } else if (settings.wideStart && !noWideToastShown) {
+                noWideToastShown = true
+                toast("This phone does not let apps use its ultra-wide lens")
             }
         }
         rotateControls(deviceRotation)
     }
 
-    private fun zoomLabel(z: Float) = if (z < 1f) String.format("%.1f", z) else "${z.toInt()}x"
+    private fun zoomLabel(z: Float) = if (z < 1f) String.format("%.1fx", z) else "${z.roundToInt()}x"
 
-    private fun buildZoomChips(cam: Camera, minZ: Float, maxZ: Float) {
-        val stops = mutableListOf<Float>()
-        if (minZ < 0.95f) stops += minZ
-        stops += 1f
-        if (maxZ >= 2f) stops += 2f
-        if (maxZ >= 5f) stops += 5f
-        zoomStops = stops
-        ui.zoomRow.removeAllViews()
-        if (stops.size < 2) return
-        for (z in stops) {
-            val tv = TextView(this).apply {
-                text = zoomLabel(z)
-                setTextColor(0xFFFFFFFF.toInt())
-                textSize = 12f
-                gravity = android.view.Gravity.CENTER
-                background = ContextCompat.getDrawable(context, R.drawable.bg_circle_dark)
-                layoutParams = LinearLayout.LayoutParams(dp(38), dp(38)).apply { marginStart = dp(6); marginEnd = dp(6) }
-                setOnClickListener { cam.cameraControl.setZoomRatio(z) }
-            }
-            ui.zoomRow.addView(tv)
+    private fun addLensChip(label: String, active: Boolean, onClick: () -> Unit) {
+        val tv = TextView(this).apply {
+            text = label
+            textSize = 12f
+            gravity = android.view.Gravity.CENTER
+            setTextColor(if (active) 0xFFFFD54F.toInt() else 0xFFFFFFFF.toInt())
+            background = ContextCompat.getDrawable(context, R.drawable.bg_circle_dark)
+            layoutParams = LinearLayout.LayoutParams(dp(42), dp(42)).apply { marginStart = dp(8); marginEnd = dp(8) }
+            setOnClickListener { onClick() }
         }
+        ui.zoomRow.addView(tv)
         rotateControls(deviceRotation)
+    }
+
+    private fun highlightLens(index: Int) {
+        for (i in 0 until ui.zoomRow.childCount) {
+            (ui.zoomRow.getChildAt(i) as? TextView)?.setTextColor(if (i == index) 0xFFFFD54F.toInt() else 0xFFFFFFFF.toInt())
+        }
+    }
+
+    @androidx.annotation.OptIn(markerClass = [ExperimentalCamera2Interop::class])
+    private fun cameraId(info: CameraInfo): String = Camera2CameraInfo.from(info).cameraId
+
+    /** Horizontal field of view in radians, from the lens focal length and sensor size. */
+    @androidx.annotation.OptIn(markerClass = [ExperimentalCamera2Interop::class])
+    private fun fieldOfView(info: CameraInfo): Float {
+        val c = Camera2CameraInfo.from(info)
+        val focal = c.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.minOrNull() ?: return 0f
+        val sensor = c.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE) ?: return 0f
+        return 2f * atan(max(sensor.width, sensor.height) / (2f * focal))
+    }
+
+    /** Finds a back camera clearly wider than the main one. Returns it with its zoom factor (e.g. 0.6). */
+    @androidx.annotation.OptIn(markerClass = [ExperimentalCamera2Interop::class])
+    private fun findUltraWide(infos: List<CameraInfo>): Pair<CameraInfo, Float>? {
+        val main = CameraSelector.DEFAULT_BACK_CAMERA.filter(infos).firstOrNull() ?: return null
+        val mainFov = fieldOfView(main)
+        if (mainFov <= 0f) return null
+        val best = infos
+            .filter { it != main }
+            .filter { Camera2CameraInfo.from(it).getCameraCharacteristic(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK }
+            .maxByOrNull { fieldOfView(it) } ?: return null
+        val fov = fieldOfView(best)
+        if (fov < mainFov * 1.2f) return null
+        return best to (tan(mainFov / 2f) / tan(fov / 2f))
+    }
+
+    /** Fills the screen edge to edge (cropping the camera to the screen's shape) or shows 16:9. */
+    private fun applyCrop() {
+        val nw = engine.naturalWidth
+        val nh = engine.naturalHeight
+        val rw = ui.root.width
+        val rh = ui.root.height
+        if (nw == 0 || nh == 0 || rw == 0 || rh == 0) return
+        val lp = ui.surface.layoutParams as ConstraintLayout.LayoutParams
+        if (settings.fullScreen) {
+            val screen = rw.toFloat() / rh
+            val cameraAspect = nw.toFloat() / nh
+            if (screen < cameraAspect) { cropX = screen / cameraAspect; cropY = 1f } else { cropX = 1f; cropY = cameraAspect / screen }
+            lp.dimensionRatio = "$rw:$rh"
+        } else {
+            cropX = 1f; cropY = 1f
+            lp.dimensionRatio = "$nw:$nh"
+        }
+        engine.setCrop(cropX, cropY)
+        ui.surface.layoutParams = lp
+        ui.aspectChip.text = if (settings.fullScreen) "FULL" else "16:9"
+    }
+
+    private fun toggleFullScreen() {
+        if (busy()) return
+        settings.fullScreen = !settings.fullScreen
+        applyCrop()
+        toast(if (settings.fullScreen) "Full screen: video matches your screen shape" else "16:9: standard video shape")
     }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -577,7 +679,7 @@ class MainActivity : AppCompatActivity() {
         val spoken = settings.handsFree
         val tone = if (spoken) null else runCatching { ToneGenerator(AudioManager.STREAM_MUSIC, 70) }.getOrNull()
         ui.countdownText.visibility = View.VISIBLE
-        ui.recordInner.background = ContextCompat.getDrawable(this, R.drawable.shutter_recording)
+        setShutter(true)
         countdown = object : CountDownTimer(seconds * 1000L, 1000L) {
             override fun onTick(msLeft: Long) {
                 val n = ((msLeft + 999) / 1000).toString()
@@ -600,7 +702,7 @@ class MainActivity : AppCompatActivity() {
         countdown?.cancel()
         countdown = null
         ui.countdownText.visibility = View.GONE
-        if (recorder == null) ui.recordInner.background = ContextCompat.getDrawable(this, R.drawable.shutter_idle)
+        if (recorder == null) setShutter(false)
     }
 
     private fun startRecording() {
@@ -608,7 +710,9 @@ class MainActivity : AppCompatActivity() {
         val nh = engine.naturalHeight
         if (nw == 0 || nh == 0) return toast("Camera is not ready yet")
         val rotation = deviceRotation
-        val (ww, wh) = if (rotation % 180 == 0) nw to nh else nh to nw
+        val cw = (nw * cropX).roundToInt() and 1.inv()
+        val ch = (nh * cropY).roundToInt() and 1.inv()
+        val (ww, wh) = if (rotation % 180 == 0) cw to ch else ch to cw
         val size = VideoRecorder.pickEncoderSize(ww, wh)
         val audio = settings.micOn && granted(Manifest.permission.RECORD_AUDIO)
         micMonitor?.stop(); micMonitor = null
@@ -634,33 +738,40 @@ class MainActivity : AppCompatActivity() {
             )
             recRef = rec
             rec.start()
-            engine.startRecording(rec.inputSurface, size.width, size.height, rec.startNs, rotation)
+            engine.startRecording(rec.inputSurface, size.width, size.height, rotation, { rec.ptsNs() }, { rec.paused })
             recorder = rec
         } catch (e: Exception) {
-            ui.recordInner.background = ContextCompat.getDrawable(this, R.drawable.shutter_idle)
+            setShutter(false)
             return toast("Cannot start recording: ${e.message}")
         }
         recordStartMs = System.currentTimeMillis()
-        ui.recordInner.background = ContextCompat.getDrawable(this, R.drawable.shutter_recording)
+        setShutter(true)
         ui.recPill.visibility = View.VISIBLE
         ui.levelBar.visibility = if (audio) View.VISIBLE else View.GONE
+        ui.flipBtn.visibility = View.GONE
+        ui.pauseBtn.visibility = View.VISIBLE
+        ui.pauseBtn.setImageResource(R.drawable.ic_pause)
         setControlsEnabled(false)
         updateMicIcon()
         tickTimer()
     }
 
     private fun tickTimer() {
-        if (recorder == null) return
-        val s = (System.currentTimeMillis() - recordStartMs) / 1000
-        ui.recTime.text = String.format("%02d:%02d", s / 60, s % 60)
+        val rec = recorder ?: return
+        val s = rec.ptsNs() / 1_000_000_000L
+        val t = String.format("%02d:%02d", s / 60, s % 60)
+        ui.recTime.text = if (rec.paused) "$t  Paused" else t
         main.postDelayed({ tickTimer() }, 500)
     }
 
     private fun stopRecording() {
         val rec = recorder ?: return
         recorder = null
-        ui.recordInner.background = ContextCompat.getDrawable(this, R.drawable.shutter_idle)
+        setShutter(false)
         ui.recPill.visibility = View.GONE
+        ui.recPill.alpha = 1f
+        ui.pauseBtn.visibility = View.GONE
+        ui.flipBtn.visibility = View.VISIBLE
         setControlsEnabled(true)
         updateMicIcon()
         engine.stopRecording {
@@ -696,9 +807,42 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun togglePause() {
+        val rec = recorder ?: return
+        if (rec.paused) {
+            rec.resume()
+            ui.pauseBtn.setImageResource(R.drawable.ic_pause)
+            ui.recPill.alpha = 1f
+        } else {
+            rec.pause()
+            ui.pauseBtn.setImageResource(R.drawable.ic_play_arrow)
+            ui.recPill.alpha = 0.7f
+        }
+        tickTimerOnce()
+    }
+
+    private fun tickTimerOnce() {
+        val rec = recorder ?: return
+        val s = rec.ptsNs() / 1_000_000_000L
+        val t = String.format("%02d:%02d", s / 60, s % 60)
+        ui.recTime.text = if (rec.paused) "$t  Paused" else t
+    }
+
+    /** Big red circle when idle; small rounded "stop" square while recording, like the system camera. */
+    private fun setShutter(recording: Boolean) {
+        val lp = ui.recordInner.layoutParams
+        val size = dp(if (recording) 32 else 64)
+        lp.width = size
+        lp.height = size
+        ui.recordInner.layoutParams = lp
+        ui.recordInner.background = ContextCompat.getDrawable(
+            this, if (recording) R.drawable.shutter_recording else R.drawable.shutter_idle
+        )
+    }
+
     private fun setControlsEnabled(enabled: Boolean) {
         val alpha = if (enabled) 1f else 0.35f
-        for (v in listOf(ui.settingsBtn, ui.flipBtn, ui.qualityChip, ui.timerBtn, ui.lastThumb)) {
+        for (v in listOf(ui.settingsBtn, ui.flipBtn, ui.qualityChip, ui.aspectChip, ui.timerBtn, ui.lastThumb, ui.zoomRow)) {
             v.isEnabled = enabled
             v.alpha = alpha
         }
@@ -817,8 +961,7 @@ class MainActivity : AppCompatActivity() {
         b.wideSwitch.isChecked = settings.wideStart
         b.wideSwitch.setOnCheckedChangeListener { _, on ->
             settings.wideStart = on
-            if (on) camera?.cameraInfo?.zoomState?.value?.let { camera?.cameraControl?.setZoomRatio(it.minZoomRatio) }
-            else camera?.cameraControl?.setZoomRatio(1f)
+            if (!settings.frontCamera) bindCamera()
         }
         b.handsFreeSwitch.isChecked = settings.handsFree
         b.handsFreeSwitch.setOnCheckedChangeListener { _, on -> setHandsFree(on, announce = true) }
@@ -999,7 +1142,7 @@ class MainActivity : AppCompatActivity() {
             else -> 0f
         }
         val views = mutableListOf<View>(
-            ui.settingsBtn, ui.flashBtn, ui.timerBox, ui.handsBtn, ui.qualityChip, ui.micBtn,
+            ui.settingsBtn, ui.flashBtn, ui.timerBox, ui.handsBtn, ui.aspectChip, ui.qualityChip, ui.micBtn, ui.pauseBtn,
             ui.flipBtn, ui.lastThumb, ui.countdownText, ui.recPill
         )
         for (i in 0 until ui.zoomRow.childCount) views += ui.zoomRow.getChildAt(i)

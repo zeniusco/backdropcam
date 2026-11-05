@@ -62,7 +62,11 @@ class CompositeEngine(context: Context) {
     private var previewH = 0
     private var encoderW = 0
     private var encoderH = 0
-    private var recordStartNs = 0L
+    private var recordPts: () -> Long = { 0L }
+    private var recordPaused: () -> Boolean = { false }
+    // Part of the natural (portrait) frame that is shown and recorded, e.g. to fill a tall screen.
+    private var cropNx = 1f
+    private var cropNy = 1f
 
     // ------------------------------------------------------------------ GL objects
     private var program = 0
@@ -210,7 +214,22 @@ class CompositeEngine(context: Context) {
         }
     }
 
-    fun startRecording(surface: Surface, w: Int, h: Int, startNs: Long, rotation: Int) {
+    /** Show and record only the centre [sx] x [sy] part of the portrait camera frame. */
+    fun setCrop(sx: Float, sy: Float) {
+        handler.post {
+            cropNx = sx.coerceIn(0.1f, 1f)
+            cropNy = sy.coerceIn(0.1f, 1f)
+        }
+    }
+
+    /**
+     * Starts sending frames to [surface]. [ptsNs] gives each frame's timestamp and frames are
+     * skipped while [paused] is true, which is how pause / resume works.
+     */
+    fun startRecording(
+        surface: Surface, w: Int, h: Int, rotation: Int,
+        ptsNs: () -> Long, paused: () -> Boolean,
+    ) {
         handler.post {
             if (rotation != deviceRotation) {
                 deviceRotation = rotation
@@ -219,7 +238,8 @@ class CompositeEngine(context: Context) {
             rotationLocked = true
             encoderSurface = EGL14.eglCreateWindowSurface(display, config, surface, intArrayOf(EGL14.EGL_NONE), 0)
             encoderW = w; encoderH = h
-            recordStartNs = startNs
+            recordPts = ptsNs
+            recordPaused = paused
         }
     }
 
@@ -337,19 +357,24 @@ class CompositeEngine(context: Context) {
         renderSmallAndSegment()
 
         if (previewSurface != EGL14.EGL_NO_SURFACE) {
-            val wFromOut = rotC(-deviceRotation)
+            val wFromOut = mul(rotC(-deviceRotation), scaleC(cropNx, cropNy))
             focusMatrix = mul(camFromW, wFromOut)
             EGL14.eglMakeCurrent(display, previewSurface, previewSurface, eglContext)
             render(previewW, previewH, wFromOut, mode)
             EGL14.eglSwapBuffers(display, previewSurface)
         }
-        if (encoderSurface != EGL14.EGL_NO_SURFACE) {
+        if (encoderSurface != EGL14.EGL_NO_SURFACE && !recordPaused()) {
             EGL14.eglMakeCurrent(display, encoderSurface, encoderSurface, eglContext)
-            render(encoderW, encoderH, identity(), mode)
-            EGLExt.eglPresentationTimeANDROID(display, encoderSurface, System.nanoTime() - recordStartNs)
+            val (cx, cy) = cropW()
+            render(encoderW, encoderH, scaleC(cx, cy), mode)
+            EGLExt.eglPresentationTimeANDROID(display, encoderSurface, recordPts())
             EGL14.eglSwapBuffers(display, encoderSurface)
         }
     }
+
+    /** The crop expressed in world axes (swapped when the phone is sideways). */
+    private fun cropW(): Pair<Float, Float> =
+        if (deviceRotation % 180 == 0) cropNx to cropNy else cropNy to cropNx
 
     private fun worldSize(): Pair<Int, Int> =
         if (deviceRotation % 180 == 0) naturalWidth to naturalHeight else naturalHeight to naturalWidth
@@ -507,7 +532,9 @@ class CompositeEngine(context: Context) {
         )
 
         val (ww, wh) = worldSize()
-        val worldAspect = if (wh > 0) ww.toFloat() / wh else 1f
+        val (cx, cy) = cropW()
+        GLES30.glUniform2f(loc("uCrop"), cx, cy)
+        val worldAspect = if (wh > 0) ww.toFloat() * cx / (wh * cy) else 1f
         var sx = 1f; var sy = 1f
         if (bgAspect > worldAspect) sx = worldAspect / bgAspect else sy = bgAspect / worldAspect
         GLES30.glUniform2f(loc("uBgScale"), sx, sy)
@@ -628,6 +655,14 @@ class CompositeEngine(context: Context) {
             }
         }
 
+        private fun scaleC(sx: Float, sy: Float) = identity().also {
+            if (sx != 1f || sy != 1f) {
+                Matrix.translateM(it, 0, 0.5f, 0.5f, 0f)
+                Matrix.scaleM(it, 0, sx, sy, 1f)
+                Matrix.translateM(it, 0, -0.5f, -0.5f, 0f)
+            }
+        }
+
         private fun flipXC() = identity().also {
             Matrix.translateM(it, 0, 0.5f, 0.5f, 0f)
             Matrix.scaleM(it, 0, -1f, 1f, 1f)
@@ -666,6 +701,7 @@ uniform float uRefine;
 uniform vec2 uEdge;
 uniform vec2 uTexel;
 uniform vec2 uBgScale;
+uniform vec2 uCrop;
 out vec4 outColor;
 
 vec3 camAt(vec2 w) { return texture(uCam, (uCamFromW * vec4(w, 0.0, 1.0)).xy).rgb; }
@@ -708,7 +744,8 @@ void main() {
         }
         bg = acc / 25.0;
     } else {
-        bg = texture(uBg, (img(vW) - 0.5) * uBgScale + 0.5).rgb;
+        vec2 visible = (vW - 0.5) / uCrop + 0.5; // backdrop fills the visible (cropped) area
+        bg = texture(uBg, (img(visible) - 0.5) * uBgScale + 0.5).rgb;
     }
     outColor = vec4(mix(bg, cam, m), 1.0);
 }
