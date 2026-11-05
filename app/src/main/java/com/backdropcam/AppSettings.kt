@@ -16,7 +16,7 @@ class AppSettings(context: Context) {
         set(v) = p.edit().putBoolean("hq", v).apply()
 
     var softness: Float
-        get() = p.getFloat("softness", 0.4f)
+        get() = p.getFloat("softness", 0.3f)
         set(v) = p.edit().putFloat("softness", v).apply()
 
     var mirrorFront: Boolean

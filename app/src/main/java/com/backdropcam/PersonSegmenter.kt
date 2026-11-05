@@ -33,7 +33,7 @@ class PersonSegmenter(context: Context, highQuality: Boolean) {
     private var lastTs = 0L
 
     /** Temporal smoothing: higher is steadier, lower reacts faster. */
-    @Volatile var smoothing = 0.45f
+    @Volatile var smoothing = 0.3f
 
     @Volatile private var resetRequested = false
 

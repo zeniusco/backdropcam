@@ -179,7 +179,7 @@ class MainActivity : AppCompatActivity() {
         engine = CompositeEngine(this)
         engine.onGeometry = { w, h -> onCameraGeometry(w, h) }
         speaker = Speaker(this)
-        coach = FramingCoach { speaker.say(it) }
+        coach = FramingCoach { speak(it) }
         voice = VoiceCommands(this) { onVoiceStart() }
         engine.framingWanted = settings.handsFree
         engine.onFraming = { f ->
@@ -843,7 +843,7 @@ class MainActivity : AppCompatActivity() {
             override fun onTick(msLeft: Long) {
                 val n = ((msLeft + 999) / 1000).toString()
                 ui.countdownText.text = n
-                if (spoken) speaker.say(n) else tone?.startTone(ToneGenerator.TONE_PROP_BEEP, 120)
+                if (spoken) speak(n) else tone?.startTone(ToneGenerator.TONE_PROP_BEEP, 120)
             }
             override fun onFinish() {
                 tone?.release()
@@ -856,7 +856,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun cancelCountdown() {
         if (countdown != null && settings.handsFree) {
-            speaker.say("Cancelled.") { startListening() }
+            speak("Cancelled.") { startListening() }
         }
         countdown?.cancel()
         countdown = null
@@ -949,7 +949,7 @@ class MainActivity : AppCompatActivity() {
                 } catch (e: Exception) {
                     main.post {
                         toast("Save failed: ${e.message}")
-                        if (settings.handsFree) speaker.say("Sorry, saving failed.") { startListening() }
+                        if (settings.handsFree) speak("Sorry, saving failed.") { startListening() }
                     }
                 }
             }
@@ -967,7 +967,7 @@ class MainActivity : AppCompatActivity() {
         showResultSheet(uri, "${rec.width}x${rec.height}  saved to Movies/BackdropCam")
         if (settings.autoUpload) startUpload()
         if (settings.handsFree) {
-            speaker.say("Saved. Say start to record again.") {
+            speak("Saved. Say start to record again.") {
                 coach.reset()
                 startListening()
             }
@@ -1282,13 +1282,13 @@ class MainActivity : AppCompatActivity() {
         if (on) {
             if (!voice.available) toast("Voice commands are not available on this phone; guidance still works")
             if (announce) {
-                speaker.say("Hands-free on. I will guide you into the frame. Say start to record, and clap twice to stop.") {
+                speak("Hands-free on. I will guide you into the frame. Say start to record, and clap twice to stop.") {
                     startListening()
                 }
             } else startListening()
         } else {
             voice.stop()
-            if (announce) speaker.say("Hands-free off.")
+            if (announce) speak("Hands-free off.")
         }
     }
 
@@ -1298,13 +1298,25 @@ class MainActivity : AppCompatActivity() {
         ui.handsBtn.setColorFilter(if (on) 0xFFFFD54F.toInt() else 0xFFFFFFFF.toInt())
     }
 
+    /**
+     * Says [text] out loud. The microphone stops listening while the phone speaks, so it can never
+     * hear its own "say start" and trigger itself; it resumes shortly after.
+     */
+    private fun speak(text: String, done: (() -> Unit)? = null) {
+        voice.stop()
+        speaker.say(text) {
+            done?.invoke()
+            main.postDelayed({ startListening() }, 700)
+        }
+    }
+
     private fun startListening() {
         if (settings.handsFree && recorder == null && countdown == null && !isFinishing) voice.start()
     }
 
     private fun onVoiceStart() {
         if (recorder != null || countdown != null) return
-        speaker.say("Okay. Recording in") { if (recorder == null && countdown == null) startCountdown(3) }
+        speak("Okay. Recording in") { if (recorder == null && countdown == null) startCountdown(3) }
     }
 
     // ================================================================== teleprompter

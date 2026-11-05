@@ -134,12 +134,14 @@ class VoiceCommands(private val context: Context, private val onStart: () -> Uni
     private val main = Handler(Looper.getMainLooper())
     private var recognizer: SpeechRecognizer? = null
     private var active = false
+    private var listeningSince = 0L
 
     val available: Boolean get() = SpeechRecognizer.isRecognitionAvailable(context)
 
     fun start() {
         if (active || !available) return
         active = true
+        listeningSince = System.currentTimeMillis()
         listen()
     }
 
@@ -174,6 +176,8 @@ class VoiceCommands(private val context: Context, private val onStart: () -> Uni
     }
 
     private fun matches(results: Bundle?): Boolean {
+        // Ignore anything heard right after listening started (echo of the phone's own voice).
+        if (System.currentTimeMillis() - listeningSince < 900) return false
         val list = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION) ?: return false
         return list.any { phrase ->
             phrase.lowercase(Locale.ROOT).split(Regex("[^a-z]+")).any { it in START_WORDS }

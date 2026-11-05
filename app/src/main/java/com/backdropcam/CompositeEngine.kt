@@ -574,9 +574,11 @@ class CompositeEngine(context: Context) {
         val (ww, wh) = worldSize()
         val (cx, cy) = cropW()
         GLES30.glUniform2f(loc("uCrop"), cx, cy)
-        GLES30.glUniform1f(loc("uPersonScale"), personScale)
+        // Size / position only apply over a backdrop image; with blur the real you is in the background.
+        val movable = effective == MODE_IMAGE
+        GLES30.glUniform1f(loc("uPersonScale"), if (movable) personScale else 1f)
         GLES30.glUniform2f(loc("uPersonAnchor"), 0.5f, 0.5f - cy / 2f)
-        GLES30.glUniform2f(loc("uPersonOffset"), personOffX * cx, personOffY * cy)
+        GLES30.glUniform2f(loc("uPersonOffset"), if (movable) personOffX * cx else 0f, if (movable) personOffY * cy else 0f)
         GLES30.glUniform1f(loc("uGain"), gain)
         GLES30.glUniform1f(loc("uWarm"), warmth)
         val worldAspect = if (wh > 0) ww.toFloat() * cx / (wh * cy) else 1f
@@ -776,19 +778,40 @@ void main() {
     float m = 1.0;
     if (uHasMask > 0.5) {
         if (uRefine > 0.5) {
-            // Joint bilateral up-sampling: the low-res mask follows the full-res colour edges.
-            float s = 0.0;
-            float ws = 0.0;
-            for (int i = -1; i <= 1; i++) {
-                for (int j = -1; j <= 1; j++) {
-                    vec2 w = p + vec2(float(i), float(j)) * uTexel * 1.5;
-                    vec3 d = camAt(w) - cam;
-                    float wt = exp(-dot(d, d) * 30.0);
-                    s += texture(uMask, img(w)).r * wt;
-                    ws += wt;
+            // Edge refinement at full resolution:
+            // 1) joint bilateral: the coarse mask follows colour edges;
+            // 2) colour-line matting: near an edge, estimate the local person colour F and
+            //    background colour B and place this pixel between them. This removes the halo
+            //    of real background around shoulders and hair when the colours differ.
+            vec3 sf = vec3(0.0);
+            vec3 sb = vec3(0.0);
+            float wf = 0.0;
+            float wb = 0.0;
+            float ms = 0.0;
+            float mw = 0.0;
+            for (int i = -2; i <= 2; i++) {
+                for (int j = -2; j <= 2; j++) {
+                    vec2 w = p + vec2(float(i), float(j)) * uTexel * 0.9;
+                    vec3 c = camAt(w);
+                    float mk = texture(uMask, img(w)).r;
+                    vec3 d = c - cam;
+                    float wt = exp(-dot(d, d) * 40.0);
+                    ms += mk * wt;
+                    mw += wt;
+                    float fk = smoothstep(0.6, 0.95, mk);
+                    float bk = 1.0 - smoothstep(0.05, 0.4, mk);
+                    sf += c * fk; wf += fk;
+                    sb += c * bk; wb += bk;
                 }
             }
-            m = s / ws;
+            float mBil = ms / mw;
+            vec3 F = sf / max(wf, 0.001);
+            vec3 B = sb / max(wb, 0.001);
+            vec3 fb = F - B;
+            float len2 = dot(fb, fb);
+            float aCol = clamp(dot(cam - B, fb) / max(len2, 0.0001), 0.0, 1.0);
+            float conf = step(0.5, wf) * step(0.5, wb) * smoothstep(0.01, 0.05, len2);
+            m = mix(mBil, aCol, conf * 0.85);
         } else {
             m = texture(uMask, img(p)).r;
         }
