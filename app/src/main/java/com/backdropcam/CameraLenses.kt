@@ -1,6 +1,10 @@
 package com.backdropcam
 
 import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CaptureRequest
+import android.util.Range
+import androidx.camera.camera2.interop.Camera2Interop
+import androidx.camera.core.Preview
 import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.CameraInfo
@@ -49,6 +53,19 @@ object CameraLenses {
         val fov = fieldOfView(best)
         if (fov < mainFov * 1.2f) return null
         return best to (tan(mainFov / 2f) / tan(fov / 2f))
+    }
+
+    /**
+     * Lets auto-exposure slow down to about 15 fps in dim rooms, so the picture is brighter and
+     * less noisy (more light per frame). In normal light it stays at 30 fps.
+     */
+    @androidx.annotation.OptIn(markerClass = [ExperimentalCamera2Interop::class])
+    fun allowLowLightExposure(builder: Preview.Builder, info: CameraInfo) {
+        val ranges = Camera2CameraInfo.from(info)
+            .getCameraCharacteristic(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) ?: return
+        val best = ranges.filter { it.upper == 30 && it.lower in 12..24 }.minByOrNull { it.lower } ?: return
+        Camera2Interop.Extender(builder)
+            .setCaptureRequestOption(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(best.lower, best.upper))
     }
 
     /**

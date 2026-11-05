@@ -152,11 +152,16 @@ class CompositeEngine(context: Context) {
     private val segBusy = AtomicBoolean(false)
     private var segBitmap: Bitmap? = null
     private val readBuf: ByteBuffer = ByteBuffer.allocateDirect(ROI_SIZE * ROI_SIZE * 4).order(ByteOrder.nativeOrder())
-    private var maskReady = false
     private var maskGen = 0
-    /** Where the current mask sits in the world: x0, y0, x1, y1 (y up). */
-    private val maskRect = floatArrayOf(0f, 0f, 1f, 1f)
-    private var maskSize = ROI_SIZE
+    // Two masks: one of the whole picture (always available, a little coarser) and one of the
+    // crop around the person (detailed). The crop mask is used inside the crop and blends into
+    // the whole-picture mask at its border, so a crop that is too tight can never cut you off.
+    private var maskFullTex = 0
+    private var fullReady = false
+    private val fullRect = floatArrayOf(0f, 0f, 1f, 1f)
+    private var roiReady = false
+    private val roiRect = floatArrayOf(0f, 0f, 1f, 1f)
+    private var segCount = 0L
     /** Crop to segment next, decided from the last mask (null = whole picture). */
     @Volatile private var nextRoi: FloatArray? = null
     private var lastRoi: FloatArray? = null
@@ -493,9 +498,12 @@ class CompositeEngine(context: Context) {
     /** Cuts the square crop around the person out of [slot] and sends it to the model. */
     private fun submitSegmentation(slot: Slot) {
         val (ww, wh) = worldSize()
-        val roi = nextRoi ?: fullRoi(ww, wh)
-        val roiChanged = lastRoi?.contentEquals(roi) != true
-        lastRoi = roi
+        val crop = nextRoi
+        val whole = crop == null || !fullReady || segCount++ % 4 == 0L
+        val roi = if (whole) fullRoi(ww, wh) else crop!!
+        // Smoothing only makes sense between masks of the same region.
+        val roiChanged = whole || lastRoi?.contentEquals(roi) != true
+        if (!whole) lastRoi = roi
 
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, roiFbo)
         // Output row 0 = top of the crop, so the read-back Bitmap is upright.
@@ -520,8 +528,10 @@ class CompositeEngine(context: Context) {
                 try {
                     mask = segmenter?.segment(bmp, resetSmoothing = roiChanged)
                     if (mask != null) {
-                        nextRoi = chooseNextRoi(mask, roi, ww, wh)
-                        reportFraming(mask, bmp, roi, mirroredView)
+                        // A whole-picture pass decides the crop afresh (it may have drifted);
+                        // a crop pass keeps it unless the person nears its edge.
+                        nextRoi = chooseNextRoi(mask, roi, ww, wh, whole)
+                        if (whole) reportFraming(mask, bmp, roi, mirroredView)
                     }
                 } catch (t: Throwable) {
                     Log.e(TAG, "segmentation failed", t)
@@ -529,7 +539,7 @@ class CompositeEngine(context: Context) {
                     segBusy.set(false)
                     val m = mask
                     handler.post {
-                        if (m != null && gen == maskGen) uploadMask(m, roi)
+                        if (m != null && gen == maskGen) uploadMask(m, roi, whole)
                         presentPendingUpTo(id) // this frame (and any skipped before it) can now be shown
                     }
                 }
@@ -552,7 +562,9 @@ class CompositeEngine(context: Context) {
      * changes when the person nears its edge or becomes much smaller, so it is stable from frame
      * to frame. A tight crop shows the model the person in much more detail.
      */
-    private fun chooseNextRoi(mask: PersonSegmenter.Mask, roi: FloatArray, ww: Int, wh: Int): FloatArray? {
+    private fun chooseNextRoi(
+        mask: PersonSegmenter.Mask, roi: FloatArray, ww: Int, wh: Int, whole: Boolean,
+    ): FloatArray? {
         val n = mask.width
         var minX = n; var maxX = -1; var minY = n; var maxY = -1; var count = 0
         var y = 0
@@ -570,7 +582,7 @@ class CompositeEngine(context: Context) {
             }
             y += 2
         }
-        if (count < (n / 2) * (n / 2) / 200) return null // nobody there: look at the whole picture
+        if (count < (n / 2) * (n / 2) / 200) return if (whole) null else nextRoi // nobody there
         val rw = roi[2] - roi[0]
         val rh = roi[3] - roi[1]
         // Person box in world coordinates (mask rows run top to bottom).
@@ -579,8 +591,8 @@ class CompositeEngine(context: Context) {
         val by1 = roi[3] - minY.toFloat() / n * rh
         val by0 = roi[3] - (maxY + 2f) / n * rh
         // If the person touches the crop edge they may continue beyond it: allow more room.
-        val touches = minX <= 2 || minY <= 2 || maxX >= n - 4 || maxY >= n - 4
-        val margin = if (touches) 1.7f else 1.35f
+        val touches = !whole && (minX <= 2 || minY <= 2 || maxX >= n - 4 || maxY >= n - 4)
+        val margin = if (touches) 2.0f else 1.6f
         val sidePx = (max((bx1 - bx0) * ww, (by1 - by0) * wh) * margin)
             .coerceIn(min(ww, wh) * 0.35f, max(ww, wh).toFloat())
         val cx = (bx0 + bx1) / 2f
@@ -591,6 +603,14 @@ class CompositeEngine(context: Context) {
 
         // Keep the current crop while it still fits well (avoids jitter and lets smoothing work).
         val pad = 0.06f
+        if (whole) {
+            // Keep the current crop if it still contains the person comfortably.
+            val cur = nextRoi ?: return target
+            val cw = cur[2] - cur[0]; val ch = cur[3] - cur[1]
+            val ok = bx0 >= cur[0] + pad * cw && bx1 <= cur[2] - pad * cw &&
+                by0 >= cur[1] + pad * ch && by1 <= cur[3] - pad * ch && cw * ww <= sidePx * 1.6f
+            return if (ok) cur else target
+        }
         val fits = bx0 >= roi[0] + pad * rw && bx1 <= roi[2] - pad * rw &&
             by0 >= roi[1] + pad * rh && by1 <= roi[3] - pad * rh &&
             !touches && rw * ww <= sidePx * 1.5f
@@ -732,22 +752,28 @@ class CompositeEngine(context: Context) {
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
     }
 
-    private fun uploadMask(mask: PersonSegmenter.Mask, roi: FloatArray) {
+    private fun uploadMask(mask: PersonSegmenter.Mask, roi: FloatArray, whole: Boolean) {
         makeCurrentAny()
         GLES30.glActiveTexture(GLES30.GL_TEXTURE1)
-        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, maskTex)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, if (whole) maskFullTex else maskTex)
         GLES30.glPixelStorei(GLES30.GL_UNPACK_ALIGNMENT, 1)
         GLES30.glTexImage2D(
             GLES30.GL_TEXTURE_2D, 0, GLES30.GL_R8, mask.width, mask.height, 0,
             GLES30.GL_RED, GLES30.GL_UNSIGNED_BYTE, ByteBuffer.wrap(mask.data)
         )
-        roi.copyInto(maskRect)
-        maskSize = mask.width
-        maskReady = true
+        if (whole) {
+            roi.copyInto(fullRect)
+            fullReady = true
+            if (nextRoi == null) roiReady = false // nobody to zoom in on
+        } else {
+            roi.copyInto(roiRect)
+            roiReady = true
+        }
     }
 
     private fun invalidateMask() {
-        maskReady = false
+        fullReady = false
+        roiReady = false
         maskGen++
         nextRoi = null
         lastRoi = null
@@ -770,6 +796,9 @@ class CompositeEngine(context: Context) {
         GLES30.glActiveTexture(GLES30.GL_TEXTURE4)
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, logoTex)
         GLES30.glUniform1i(loc("uLogo"), 4)
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE5)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, maskFullTex)
+        GLES30.glUniform1i(loc("uMaskFull"), 5)
 
         GLES30.glUniform1i(loc("uFrame"), 0)
         GLES30.glUniform1i(loc("uMask"), 1)
@@ -780,13 +809,16 @@ class CompositeEngine(context: Context) {
 
         val effective = if (renderMode == MODE_IMAGE && !bgReady) MODE_BLUR else renderMode
         GLES30.glUniform1f(loc("uMode"), effective.toFloat())
-        GLES30.glUniform1f(loc("uHasMask"), if (maskReady) 1f else 0f)
+        GLES30.glUniform1f(loc("uHasMask"), if (fullReady) 1f else 0f)
+        GLES30.glUniform1f(loc("uHasRoi"), if (roiReady && fullReady) 1f else 0f)
         GLES30.glUniform1f(loc("uRefine"), if (refine) 1f else 0f)
         GLES30.glUniform2f(loc("uEdge"), edgeLo, edgeHi)
-        GLES30.glUniform4f(loc("uMaskRect"), maskRect[0], maskRect[1], maskRect[2], maskRect[3])
+        GLES30.glUniform4f(loc("uMaskRect"), roiRect[0], roiRect[1], roiRect[2], roiRect[3])
+        GLES30.glUniform4f(loc("uFullRect"), fullRect[0], fullRect[1], fullRect[2], fullRect[3])
+        val texelRect = if (roiReady) roiRect else fullRect
         GLES30.glUniform2f(
             loc("uMaskTexel"),
-            (maskRect[2] - maskRect[0]) / maskSize, (maskRect[3] - maskRect[1]) / maskSize
+            (texelRect[2] - texelRect[0]) / ROI_SIZE, (texelRect[3] - texelRect[1]) / ROI_SIZE
         )
         GLES30.glUniform2f(
             loc("uSmallTexel"),
@@ -871,21 +903,21 @@ class CompositeEngine(context: Context) {
 
         copyProgram = buildProgram(COPY_VERTEX, COPY_FRAGMENT)
         program = buildProgram(VERTEX, FRAGMENT)
-        val t = IntArray(6)
-        GLES30.glGenTextures(6, t, 0)
-        oesTex = t[0]; maskTex = t[1]; bgTex = t[2]; smallTex = t[3]; roiTex = t[4]; logoTex = t[5]
+        val t = IntArray(7)
+        GLES30.glGenTextures(7, t, 0)
+        oesTex = t[0]; maskTex = t[1]; bgTex = t[2]; smallTex = t[3]; roiTex = t[4]; logoTex = t[5]; maskFullTex = t[6]
         val f = IntArray(2)
         GLES30.glGenFramebuffers(2, f, 0)
         smallFbo = f[0]; roiFbo = f[1]
 
         GLES30.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, oesTex)
         setLinear(GLES11Ext.GL_TEXTURE_EXTERNAL_OES)
-        for (tex in intArrayOf(maskTex, bgTex, smallTex, roiTex, logoTex)) {
+        for (tex in intArrayOf(maskTex, bgTex, smallTex, roiTex, logoTex, maskFullTex)) {
             GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, tex)
             setLinear(GLES30.GL_TEXTURE_2D)
         }
         // 1x1 placeholders so every sampler is always valid
-        for (tex in intArrayOf(bgTex, maskTex, logoTex)) {
+        for (tex in intArrayOf(bgTex, maskTex, logoTex, maskFullTex)) {
             GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, tex)
             GLES30.glTexImage2D(
                 GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA, 1, 1, 0, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE,
@@ -1023,7 +1055,10 @@ void main() {
 precision highp float;
 in vec2 vW;
 uniform sampler2D uFrame;   // upright camera frame (natural space), with mipmaps
-uniform sampler2D uMask;    // person mask of the crop uMaskRect, rows top to bottom
+uniform sampler2D uMask;    // detailed person mask of the crop uMaskRect, rows top to bottom
+uniform sampler2D uMaskFull; // person mask of the whole picture (uFullRect)
+uniform vec4 uFullRect;
+uniform float uHasRoi;
 uniform sampler2D uSmall;   // small copy of the picture, for the blur effect
 uniform sampler2D uBg;
 uniform mat4 uNFromW;
@@ -1067,11 +1102,17 @@ vec3 withLogo(vec3 c) {
 vec3 camAt(vec2 w) { return texture(uFrame, (uNFromW * vec4(w, 0.0, 1.0)).xy).rgb; }
 vec2 img(vec2 w) { return vec2(w.x, 1.0 - w.y); }
 
-// Person probability at world point w (0 outside the segmented crop).
+// Person probability at world point w: the detailed crop mask inside the crop, fading into
+// the whole-picture mask towards the crop's border, so the crop can never cut the person.
 float maskAt(vec2 w) {
+    vec2 f = (w - uFullRect.xy) / (uFullRect.zw - uFullRect.xy);
+    float full = texture(uMaskFull, vec2(f.x, 1.0 - f.y)).r;
+    if (uHasRoi < 0.5) return full;
     vec2 m = (w - uMaskRect.xy) / (uMaskRect.zw - uMaskRect.xy);
-    if (m.x < 0.0 || m.x > 1.0 || m.y < 0.0 || m.y > 1.0) return 0.0;
-    return texture(uMask, vec2(m.x, 1.0 - m.y)).r;
+    float edge = min(min(m.x, 1.0 - m.x), min(m.y, 1.0 - m.y));
+    if (edge <= 0.0) return full;
+    float roi = texture(uMask, vec2(m.x, 1.0 - m.y)).r;
+    return mix(full, roi, smoothstep(0.0, 0.08, edge));
 }
 
 vec3 adjust(vec3 c) {

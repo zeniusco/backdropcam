@@ -381,10 +381,11 @@ class MainActivity : AppCompatActivity() {
                 return@addListener
             }
             val fourByThree = settings.viewMode == "43"
-            val p = Preview.Builder()
+            val builder = Preview.Builder()
                 .setResolutionSelector(CameraLenses.resolutionSelector(settings.qualityCap, fourByThree))
                 .setTargetRotation(Surface.ROTATION_0)
-                .build()
+            runCatching { CameraLenses.allowLowLightExposure(builder, info) }
+            val p = builder.build()
             p.setSurfaceProvider(engine.surfaceProvider(front, info.sensorRotationDegrees))
             try {
                 camera = provider.bindToLifecycle(this, selector, p)
