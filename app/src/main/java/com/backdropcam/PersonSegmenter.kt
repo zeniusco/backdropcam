@@ -10,6 +10,7 @@ import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.core.Delegate
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.imagesegmenter.ImageSegmenter
+import kotlin.math.abs
 import kotlin.math.max
 
 /**
@@ -61,8 +62,12 @@ class PersonSegmenter(context: Context, highQuality: Boolean) {
         resetRequested = true
     }
 
-    fun segment(bitmap: Bitmap): Mask? {
-        if (resetRequested) {
+    /**
+     * Segments [bitmap]. Pass [resetSmoothing] when the picture region changed (e.g. the crop
+     * around the person moved), so the previous mask is not blended in at the wrong place.
+     */
+    fun segment(bitmap: Bitmap, resetSmoothing: Boolean = false): Mask? {
+        if (resetRequested || resetSmoothing) {
             prev = null
             resetRequested = false
         }
@@ -92,10 +97,15 @@ class PersonSegmenter(context: Context, highQuality: Boolean) {
 
         val p = prev?.takeIf { it.size == n }
         val out = ByteArray(n)
-        val a = SMOOTHING
         for (i in 0 until n) {
             var v = if (invert) 1f - cur[i] else cur[i]
-            if (p != null) v = a * p[i] + (1f - a) * v
+            if (p != null) {
+                // Motion-aware smoothing: steady where the edge barely changed (no flicker),
+                // none where it moved (no trailing ghost when you move).
+                val change = abs(v - p[i])
+                val a = SMOOTHING * (1f - ((change - 0.08f) / 0.17f).coerceIn(0f, 1f))
+                v = a * p[i] + (1f - a) * v
+            }
             cur[i] = v
             out[i] = (v.coerceIn(0f, 1f) * 255f).toInt().toByte()
         }
@@ -109,8 +119,8 @@ class PersonSegmenter(context: Context, highQuality: Boolean) {
 
     companion object {
         private const val TAG = "PersonSegmenter"
-        /** Temporal smoothing of the mask: higher is steadier, lower follows movement faster. */
-        private const val SMOOTHING = 0.3f
+        /** Temporal smoothing of still edges: higher is steadier. Moving edges are not smoothed. */
+        private const val SMOOTHING = 0.5f
         const val MODEL_HQ = "selfie_multiclass_256x256.tflite"
         const val MODEL_FAST = "selfie_segmenter.tflite"
     }

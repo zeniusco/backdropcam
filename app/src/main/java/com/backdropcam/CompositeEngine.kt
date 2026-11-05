@@ -15,6 +15,7 @@ import android.opengl.GLUtils
 import android.opengl.Matrix
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
 import androidx.camera.core.Preview
@@ -24,8 +25,12 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
+import kotlin.math.floor
+import kotlin.math.ln
+import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
@@ -37,11 +42,11 @@ import kotlin.math.roundToInt
  *  - W "world":   N rotated by how the user holds the phone, so people are always upright.
  *                 Recordings are made in W, so a phone held sideways records landscape.
  *
- * Every frame:
- *  1. The camera frame is drawn in W into a small offscreen texture (about 288 px on the short side).
- *  2. That exact image is read back and segmented, so the mask always matches the picture.
- *     The small texture is also the source for the "blur background" effect.
- *  3. Camera + mask + background are composited to the screen (in N) and to the encoder (in W).
+ * Every camera frame:
+ *  1. is copied (upright, full resolution) into a small ring of frames;
+ *  2. a square crop around the person is cut from it and segmented on another thread;
+ *  3. the frame is shown and recorded only when ITS OWN mask is ready, so the cut-out never
+ *     trails behind movement. Frames keep the timestamp of their capture, so sound stays in sync.
  */
 class CompositeEngine(context: Context) {
 
@@ -69,14 +74,17 @@ class CompositeEngine(context: Context) {
     private var cropNy = 1f
 
     // ------------------------------------------------------------------ GL objects
-    private var program = 0
+    private var copyProgram = 0  // camera (external texture) -> upright frame in the ring
+    private var program = 0      // everything else
     private var oesTex = 0
     private var maskTex = 0
     private var bgTex = 0
-    private var smallTex = 0
-    private var fbo = 0
+    private var smallTex = 0     // small copy of the whole picture, source of the blur effect
+    private var smallFbo = 0
     private var smallW = 0
     private var smallH = 0
+    private var roiTex = 0       // square crop around the person, input of the segmentation
+    private var roiFbo = 0
     private var cameraTexture: SurfaceTexture? = null
     private var cameraSurface: Surface? = null
     private val quad = ByteBuffer.allocateDirect(16 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer().apply {
@@ -84,6 +92,21 @@ class CompositeEngine(context: Context) {
         position(0)
     }
     private val locs = HashMap<String, Int>()
+    private val copyLocs = HashMap<String, Int>()
+
+    // ------------------------------------------------------------------ frame ring
+    private class Slot(val tex: Int, val fbo: Int) {
+        var id = 0L
+        var pending = false
+        var capturedMs = 0L
+        var encode = false
+        var ptsNs = 0L
+    }
+
+    private val ring = ArrayList<Slot>()
+    private var ringW = 0
+    private var ringH = 0
+    private var frameCounter = 0L
 
     // ------------------------------------------------------------------ camera geometry
     private var bufW = 0
@@ -93,7 +116,7 @@ class CompositeEngine(context: Context) {
     private var geometryReady = false
     private val stMatrix = FloatArray(16)
     private var fixMatrix = identity()
-    private var camFromW = identity()
+    private var nFromW = identity()
 
     @Volatile var naturalWidth = 0; private set
     @Volatile var naturalHeight = 0; private set
@@ -112,20 +135,26 @@ class CompositeEngine(context: Context) {
     private var bgAspect = 1f
     private var bgReady = false
 
-    // ------------------------------------------------------------------ segmentation
-    @Volatile private var segmenter: PersonSegmenter? = null
-    private val segBusy = AtomicBoolean(false)
-    private var segBitmap: Bitmap? = null
-    private var readBuf: ByteBuffer? = null
-    private var maskReady = false
-    private var maskGen = 0
-
     // Person layer: size (1 = as filmed), offset in world units, colour adjustment.
     private var personScale = 1f
     private var personOffX = 0f
     private var personOffY = 0f
     private var gain = 1f
     private var warmth = 0f
+
+    // ------------------------------------------------------------------ segmentation
+    @Volatile private var segmenter: PersonSegmenter? = null
+    private val segBusy = AtomicBoolean(false)
+    private var segBitmap: Bitmap? = null
+    private val readBuf: ByteBuffer = ByteBuffer.allocateDirect(ROI_SIZE * ROI_SIZE * 4).order(ByteOrder.nativeOrder())
+    private var maskReady = false
+    private var maskGen = 0
+    /** Where the current mask sits in the world: x0, y0, x1, y1 (y up). */
+    private val maskRect = floatArrayOf(0f, 0f, 1f, 1f)
+    private var maskSize = ROI_SIZE
+    /** Crop to segment next, decided from the last mask (null = whole picture). */
+    @Volatile private var nextRoi: FloatArray? = null
+    private var lastRoi: FloatArray? = null
 
     /** Set true to keep segmenting (for framing guidance) even with no background effect. */
     @Volatile var framingWanted = false
@@ -164,6 +193,10 @@ class CompositeEngine(context: Context) {
             destroyPreview()
             previewSurface = EGL14.eglCreateWindowSurface(display, config, surface, intArrayOf(EGL14.EGL_NONE), 0)
             previewW = w; previewH = h
+            // Frames can come in short bursts (when a mask arrives); never wait for the display.
+            EGL14.eglMakeCurrent(display, previewSurface, previewSurface, eglContext)
+            EGL14.eglSwapInterval(display, 0)
+            makeCurrentAny()
         }
     }
 
@@ -184,7 +217,7 @@ class CompositeEngine(context: Context) {
                 old?.close()
             }
             handler.post { invalidateMask() }
-        } catch (e: java.util.concurrent.RejectedExecutionException) {
+        } catch (e: RejectedExecutionException) {
             newSegmenter.close() // the engine was released meanwhile
         }
     }
@@ -220,6 +253,7 @@ class CompositeEngine(context: Context) {
     fun setDeviceRotation(degrees: Int) {
         handler.post {
             if (!rotationLocked && degrees != deviceRotation) {
+                presentPendingUpTo(Long.MAX_VALUE)
                 deviceRotation = degrees
                 invalidateMask()
             }
@@ -255,8 +289,8 @@ class CompositeEngine(context: Context) {
     }
 
     /**
-     * Starts sending frames to [surface]. [ptsNs] gives each frame's timestamp and frames are
-     * skipped while [paused] is true, which is how pause / resume works.
+     * Starts sending frames to [surface]. [ptsNs] gives each frame's timestamp (read when the
+     * frame is captured) and frames captured while [paused] is true are skipped.
      */
     fun startRecording(
         surface: Surface, w: Int, h: Int, rotation: Int,
@@ -264,6 +298,7 @@ class CompositeEngine(context: Context) {
     ) {
         handler.post {
             if (rotation != deviceRotation) {
+                presentPendingUpTo(Long.MAX_VALUE)
                 deviceRotation = rotation
                 invalidateMask()
             }
@@ -275,9 +310,10 @@ class CompositeEngine(context: Context) {
         }
     }
 
-    /** [done] runs on the GL thread once the encoder no longer receives frames. */
+    /** [done] runs on the GL thread once the encoder has received its last frame. */
     fun stopRecording(done: () -> Unit) {
         handler.post {
+            presentPendingUpTo(Long.MAX_VALUE) // flush frames still waiting for their mask
             if (encoderSurface != EGL14.EGL_NO_SURFACE) {
                 makeCurrentAny()
                 EGL14.eglDestroySurface(display, encoderSurface)
@@ -314,6 +350,7 @@ class CompositeEngine(context: Context) {
     // ================================================================== camera input
 
     private fun attachCamera(request: SurfaceRequest, front: Boolean, sensorDeg: Int) {
+        presentPendingUpTo(Long.MAX_VALUE)
         cameraSurface?.release()
         cameraTexture?.release()
         isFront = front
@@ -325,7 +362,7 @@ class CompositeEngine(context: Context) {
 
         val st = SurfaceTexture(oesTex)
         st.setDefaultBufferSize(bufW, bufH)
-        st.setOnFrameAvailableListener({ drawFrame() }, handler)
+        st.setOnFrameAvailableListener({ onCameraFrame() }, handler)
         val surface = Surface(st)
         cameraTexture = st
         cameraSurface = surface
@@ -368,9 +405,9 @@ class CompositeEngine(context: Context) {
         ContextCompat.getMainExecutor(appContext).execute { onGeometry?.invoke(nw, nh) }
     }
 
-    // ================================================================== per frame
+    // ================================================================== per camera frame
 
-    private fun drawFrame() {
+    private fun onCameraFrame() {
         val st = cameraTexture ?: return
         makeCurrentAny()
         try {
@@ -383,25 +420,236 @@ class CompositeEngine(context: Context) {
 
         // Front camera is a mirror view at this point; un-mirror it if the user turned mirroring off.
         val personMirror = if (isFront && !mirrorFront) flipXC() else identity()
-        camFromW = mul(mul(mul(stMatrix.copyOf(), fixMatrix), rotC(deviceRotation)), personMirror)
+        nFromW = mul(rotC(deviceRotation), personMirror)
+        val camTexFromN = mul(stMatrix.copyOf(), fixMatrix)
 
+        ensureRing()
         ensureSmallTarget()
-        renderSmallAndSegment()
+        if (ring.isEmpty()) return
 
+        // 1. Copy the frame into the ring (a slot still waiting is shown first, with the latest mask).
+        val slot = ring[(frameCounter % ring.size).toInt()]
+        if (slot.pending) presentPendingUpTo(slot.id)
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, slot.fbo)
+        GLES30.glViewport(0, 0, ringW, ringH)
+        GLES30.glUseProgram(copyProgram)
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
+        GLES30.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, oesTex)
+        GLES30.glUniform1i(copyLoc("uCam"), 0)
+        GLES30.glUniformMatrix4fv(copyLoc("uTexM"), 1, false, camTexFromN, 0)
+        drawQuad()
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+        // Mipmaps let the small crops (segmentation, blur) be made without aliasing.
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, slot.tex)
+        GLES30.glGenerateMipmap(GLES30.GL_TEXTURE_2D)
+
+        val now = SystemClock.uptimeMillis()
+        slot.id = ++frameCounter
+        slot.pending = true
+        slot.capturedMs = now
+        slot.encode = encoderSurface != EGL14.EGL_NO_SURFACE && !recordPaused()
+        slot.ptsNs = if (slot.encode) recordPts() else 0L
+
+        // 2. Segment it, or show it straight away when no cut-out is needed.
+        val wanted = (mode != MODE_NONE || framingWanted) && segmenter != null
+        if (!wanted) {
+            presentPendingUpTo(slot.id)
+            return
+        }
+        if (segBusy.compareAndSet(false, true)) submitSegmentation(slot)
+        // Safety net: never hold a frame for long if the model is slow or failing.
+        val stale = ring.filter { it.pending && now - it.capturedMs > MAX_WAIT_MS }.maxOfOrNull { it.id }
+        if (stale != null) presentPendingUpTo(stale)
+    }
+
+    /** Cuts the square crop around the person out of [slot] and sends it to the model. */
+    private fun submitSegmentation(slot: Slot) {
+        val (ww, wh) = worldSize()
+        val roi = nextRoi ?: fullRoi(ww, wh)
+        val roiChanged = lastRoi?.contentEquals(roi) != true
+        lastRoi = roi
+
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, roiFbo)
+        // Output row 0 = top of the crop, so the read-back Bitmap is upright.
+        val wFromOut = identity().also {
+            Matrix.translateM(it, 0, roi[0], roi[3], 0f)
+            Matrix.scaleM(it, 0, roi[2] - roi[0], -(roi[3] - roi[1]), 1f)
+        }
+        render(ROI_SIZE, ROI_SIZE, wFromOut, MODE_RAW, slot.tex)
+        readBuf.clear()
+        GLES30.glReadPixels(0, 0, ROI_SIZE, ROI_SIZE, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, readBuf)
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+        val bmp = segBitmap ?: Bitmap.createBitmap(ROI_SIZE, ROI_SIZE, Bitmap.Config.ARGB_8888).also { segBitmap = it }
+        readBuf.rewind()
+        bmp.copyPixelsFromBuffer(readBuf)
+
+        val id = slot.id
+        val gen = maskGen
+        val mirroredView = isFront && mirrorFront
+        try {
+            segExecutor.execute {
+                var mask: PersonSegmenter.Mask? = null
+                try {
+                    mask = segmenter?.segment(bmp, resetSmoothing = roiChanged)
+                    if (mask != null) {
+                        nextRoi = chooseNextRoi(mask, roi, ww, wh)
+                        reportFraming(mask, bmp, roi, mirroredView)
+                    }
+                } catch (t: Throwable) {
+                    Log.e(TAG, "segmentation failed", t)
+                } finally {
+                    segBusy.set(false)
+                    val m = mask
+                    handler.post {
+                        if (m != null && gen == maskGen) uploadMask(m, roi)
+                        presentPendingUpTo(id) // this frame (and any skipped before it) can now be shown
+                    }
+                }
+            }
+        } catch (e: RejectedExecutionException) {
+            segBusy.set(false)
+        }
+    }
+
+    /** A square crop (in pixels) covering the whole picture, letterboxed. */
+    private fun fullRoi(ww: Int, wh: Int): FloatArray {
+        val side = max(ww, wh).toFloat()
+        val hx = side / 2f / ww
+        val hy = side / 2f / wh
+        return floatArrayOf(0.5f - hx, 0.5f - hy, 0.5f + hx, 0.5f + hy)
+    }
+
+    /**
+     * Picks the next crop from where the person is in [mask] (which covers [roi]). The crop only
+     * changes when the person nears its edge or becomes much smaller, so it is stable from frame
+     * to frame. A tight crop shows the model the person in much more detail.
+     */
+    private fun chooseNextRoi(mask: PersonSegmenter.Mask, roi: FloatArray, ww: Int, wh: Int): FloatArray? {
+        val n = mask.width
+        var minX = n; var maxX = -1; var minY = n; var maxY = -1; var count = 0
+        var y = 0
+        while (y < n) {
+            var x = 0
+            while (x < n) {
+                if ((mask.data[y * n + x].toInt() and 0xFF) > 128) {
+                    count++
+                    if (x < minX) minX = x
+                    if (x > maxX) maxX = x
+                    if (y < minY) minY = y
+                    if (y > maxY) maxY = y
+                }
+                x += 2
+            }
+            y += 2
+        }
+        if (count < (n / 2) * (n / 2) / 200) return null // nobody there: look at the whole picture
+        val rw = roi[2] - roi[0]
+        val rh = roi[3] - roi[1]
+        // Person box in world coordinates (mask rows run top to bottom).
+        val bx0 = roi[0] + minX.toFloat() / n * rw
+        val bx1 = roi[0] + (maxX + 2f) / n * rw
+        val by1 = roi[3] - minY.toFloat() / n * rh
+        val by0 = roi[3] - (maxY + 2f) / n * rh
+        // If the person touches the crop edge they may continue beyond it: allow more room.
+        val touches = minX <= 2 || minY <= 2 || maxX >= n - 4 || maxY >= n - 4
+        val margin = if (touches) 1.7f else 1.35f
+        val sidePx = (max((bx1 - bx0) * ww, (by1 - by0) * wh) * margin)
+            .coerceIn(min(ww, wh) * 0.35f, max(ww, wh).toFloat())
+        val cx = (bx0 + bx1) / 2f
+        val cy = (by0 + by1) / 2f
+        val hx = sidePx / 2f / ww
+        val hy = sidePx / 2f / wh
+        val target = floatArrayOf(cx - hx, cy - hy, cx + hx, cy + hy)
+
+        // Keep the current crop while it still fits well (avoids jitter and lets smoothing work).
+        val pad = 0.06f
+        val fits = bx0 >= roi[0] + pad * rw && bx1 <= roi[2] - pad * rw &&
+            by0 >= roi[1] + pad * rh && by1 <= roi[3] - pad * rh &&
+            !touches && rw * ww <= sidePx * 1.5f
+        return if (fits) roi else target
+    }
+
+    /** Runs on the segmentation thread. Converts the crop's mask into whole-picture framing. */
+    private fun reportFraming(mask: PersonSegmenter.Mask, frame: Bitmap, roi: FloatArray, mirrored: Boolean) {
+        val cb = onFraming ?: return
+        val now = SystemClock.uptimeMillis()
+        if (now - lastFramingMs < 150) return
+        lastFramingMs = now
+        val n = mask.width
+        val pixels = IntArray(n * n).also { frame.getPixels(it, 0, n, 0, 0, n, n) }
+        var sr = 0L; var sg = 0L; var sb = 0L
+        var count = 0
+        var sumX = 0.0
+        var minY = n; var maxY = -1
+        var y = 0
+        while (y < n) {
+            var x = 0
+            while (x < n) {
+                val i = y * n + x
+                if ((mask.data[i].toInt() and 0xFF) > 140) {
+                    count++
+                    sumX += x
+                    val c = pixels[i]
+                    sr += (c shr 16) and 0xFF; sg += (c shr 8) and 0xFF; sb += c and 0xFF
+                    if (y < minY) minY = y
+                    if (y > maxY) maxY = y
+                }
+                x += 2
+            }
+            y += 2
+        }
+        val rw = roi[2] - roi[0]
+        val rh = roi[3] - roi[1]
+        val f = if (count == 0) {
+            Framing(0f, 0.5f, 0f, 0f, mirrored)
+        } else {
+            val samples = ((n + 1) / 2) * ((n + 1) / 2)
+            Framing(
+                coverage = count.toFloat() / samples * rw * rh,
+                centerX = (roi[0] + (sumX / count).toFloat() / n * rw).coerceIn(0f, 1f),
+                top = (1f - (roi[3] - minY.toFloat() / n * rh)).coerceIn(0f, 1f),
+                bottom = (1f - (roi[3] - (maxY + 1f) / n * rh)).coerceIn(0f, 1f),
+                mirrored = mirrored,
+                meanR = sr / (255f * count), meanG = sg / (255f * count), meanB = sb / (255f * count),
+            )
+        }
+        ContextCompat.getMainExecutor(appContext).execute { cb(f) }
+    }
+
+    // ================================================================== showing / recording frames
+
+    /** Shows (and records) every waiting frame up to [id], oldest first, with the current mask. */
+    private fun presentPendingUpTo(id: Long) {
+        while (true) {
+            val next = ring.filter { it.pending && it.id <= id }.minByOrNull { it.id } ?: return
+            present(next)
+        }
+    }
+
+    private fun present(slot: Slot) {
+        slot.pending = false
+        makeCurrentAny()
+        if (mode == MODE_BLUR || (mode == MODE_IMAGE && !bgReady)) {
+            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, smallFbo)
+            // Flipped so the blur texture's rows run top to bottom, like the mask.
+            render(smallW, smallH, flipYC(), MODE_RAW, slot.tex)
+            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+        }
         if (previewSurface != EGL14.EGL_NO_SURFACE) {
             val wFromOut = mul(rotC(-deviceRotation), scaleC(cropNx, cropNy))
-            focusMatrix = mul(camFromW, wFromOut)
+            focusMatrix = mul(mul(mul(stMatrix.copyOf(), fixMatrix), nFromW), wFromOut)
             EGL14.eglMakeCurrent(display, previewSurface, previewSurface, eglContext)
-            render(previewW, previewH, wFromOut, mode)
+            render(previewW, previewH, wFromOut, mode, slot.tex)
             EGL14.eglSwapBuffers(display, previewSurface)
         }
-        if (encoderSurface != EGL14.EGL_NO_SURFACE && !recordPaused()) {
+        if (slot.encode && encoderSurface != EGL14.EGL_NO_SURFACE) {
             EGL14.eglMakeCurrent(display, encoderSurface, encoderSurface, eglContext)
             val (cx, cy) = cropW()
-            render(encoderW, encoderH, scaleC(cx, cy), mode)
-            EGLExt.eglPresentationTimeANDROID(display, encoderSurface, recordPts())
+            render(encoderW, encoderH, scaleC(cx, cy), mode, slot.tex)
+            EGLExt.eglPresentationTimeANDROID(display, encoderSurface, slot.ptsNs)
             EGL14.eglSwapBuffers(display, encoderSurface)
         }
+        makeCurrentAny()
     }
 
     /** The crop expressed in world axes (swapped when the phone is sideways). */
@@ -410,6 +658,35 @@ class CompositeEngine(context: Context) {
 
     private fun worldSize(): Pair<Int, Int> =
         if (deviceRotation % 180 == 0) naturalWidth to naturalHeight else naturalHeight to naturalWidth
+
+    /** The ring holds a few upright full-resolution frames (with mipmaps) while masks are computed. */
+    private fun ensureRing() {
+        val w = naturalWidth
+        val h = naturalHeight
+        if (w == 0 || h == 0 || (w == ringW && h == ringH && ring.isNotEmpty())) return
+        for (s in ring) {
+            GLES30.glDeleteTextures(1, intArrayOf(s.tex), 0)
+            GLES30.glDeleteFramebuffers(1, intArrayOf(s.fbo), 0)
+        }
+        ring.clear()
+        ringW = w; ringH = h
+        val levels = 1 + floor(ln(max(w, h).toDouble()) / ln(2.0)).toInt()
+        repeat(RING_SIZE) {
+            val t = IntArray(1); val f = IntArray(1)
+            GLES30.glGenTextures(1, t, 0)
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, t[0])
+            GLES30.glTexStorage2D(GLES30.GL_TEXTURE_2D, levels, GLES30.GL_RGBA8, w, h)
+            GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_LINEAR_MIPMAP_LINEAR)
+            GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_LINEAR)
+            GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_S, GLES30.GL_CLAMP_TO_EDGE)
+            GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_T, GLES30.GL_CLAMP_TO_EDGE)
+            GLES30.glGenFramebuffers(1, f, 0)
+            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, f[0])
+            GLES30.glFramebufferTexture2D(GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0, GLES30.GL_TEXTURE_2D, t[0], 0)
+            ring += Slot(t[0], f[0])
+        }
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+    }
 
     private fun ensureSmallTarget() {
         val (ww, wh) = worldSize()
@@ -420,106 +697,14 @@ class CompositeEngine(context: Context) {
         if (sw == smallW && sh == smallH) return
         smallW = sw; smallH = sh
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, smallTex)
-        GLES30.glTexImage2D(
-            GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA, sw, sh, 0,
-            GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, null
-        )
+        GLES30.glTexImage2D(GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA, sw, sh, 0, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, null)
         setLinear(GLES30.GL_TEXTURE_2D)
-        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, fbo)
-        GLES30.glFramebufferTexture2D(
-            GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0, GLES30.GL_TEXTURE_2D, smallTex, 0
-        )
-        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
-        readBuf = ByteBuffer.allocateDirect(sw * sh * 4).order(ByteOrder.nativeOrder())
-        invalidateMask()
-    }
-
-    private fun renderSmallAndSegment() {
-        if (smallW == 0) return
-        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, fbo)
-        // Flip y so the read-back rows come out top-first (an upright Bitmap).
-        render(smallW, smallH, flipYC(), MODE_RAW)
-
-        if ((mode != MODE_NONE || framingWanted) && segmenter != null && segBusy.compareAndSet(false, true)) {
-            val buf = readBuf!!
-            buf.clear()
-            GLES30.glReadPixels(0, 0, smallW, smallH, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, buf)
-            var bmp = segBitmap
-            if (bmp == null || bmp.width != smallW || bmp.height != smallH) {
-                bmp = Bitmap.createBitmap(smallW, smallH, Bitmap.Config.ARGB_8888)
-                segBitmap = bmp
-            }
-            buf.rewind()
-            bmp!!.copyPixelsFromBuffer(buf)
-            val gen = maskGen
-            val frame = bmp
-            val mirroredView = isFront && mirrorFront
-            segExecutor.execute {
-                try {
-                    val result = segmenter?.segment(frame)
-                    if (result != null) {
-                        handler.post { if (gen == maskGen) uploadMask(result) }
-                        reportFraming(result, frame, mirroredView)
-                    }
-                } catch (t: Throwable) {
-                    Log.e(TAG, "segmentation failed", t)
-                } finally {
-                    segBusy.set(false)
-                }
-            }
-        }
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, smallFbo)
+        GLES30.glFramebufferTexture2D(GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0, GLES30.GL_TEXTURE_2D, smallTex, 0)
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
     }
 
-    /** Runs on the segmentation thread. */
-    private fun reportFraming(mask: PersonSegmenter.Mask, frame: Bitmap, mirrored: Boolean) {
-        val cb = onFraming ?: return
-        val now = System.currentTimeMillis()
-        if (now - lastFramingMs < 150) return
-        lastFramingMs = now
-        val w = mask.width
-        val h = mask.height
-        val pixels = if (frame.width == w && frame.height == h) IntArray(w * h).also {
-            frame.getPixels(it, 0, w, 0, 0, w, h)
-        } else null
-        var sr = 0L; var sg = 0L; var sb = 0L
-        var count = 0
-        var sumX = 0L
-        var minY = h; var maxY = -1
-        var y = 0
-        while (y < h) {
-            var x = 0
-            val row = y * w
-            while (x < w) {
-                if ((mask.data[row + x].toInt() and 0xFF) > 140) {
-                    count++
-                    sumX += x
-                    if (pixels != null) {
-                        val c = pixels[row + x]
-                        sr += (c shr 16) and 0xFF; sg += (c shr 8) and 0xFF; sb += c and 0xFF
-                    }
-                    if (y < minY) minY = y
-                    if (y > maxY) maxY = y
-                }
-                x += 2
-            }
-            y += 2
-        }
-        val total = ((w + 1) / 2) * ((h + 1) / 2)
-        val f = if (count == 0) {
-            Framing(0f, 0.5f, 0f, 0f, mirrored)
-        } else {
-            Framing(
-                count.toFloat() / total, sumX.toFloat() / count / w,
-                minY.toFloat() / h, maxY.toFloat() / h,
-                mirrored,
-                sr / (255f * count), sg / (255f * count), sb / (255f * count)
-            )
-        }
-        ContextCompat.getMainExecutor(appContext).execute { cb(f) }
-    }
-
-    private fun uploadMask(mask: PersonSegmenter.Mask) {
+    private fun uploadMask(mask: PersonSegmenter.Mask, roi: FloatArray) {
         makeCurrentAny()
         GLES30.glActiveTexture(GLES30.GL_TEXTURE1)
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, maskTex)
@@ -528,21 +713,25 @@ class CompositeEngine(context: Context) {
             GLES30.GL_TEXTURE_2D, 0, GLES30.GL_R8, mask.width, mask.height, 0,
             GLES30.GL_RED, GLES30.GL_UNSIGNED_BYTE, ByteBuffer.wrap(mask.data)
         )
+        roi.copyInto(maskRect)
+        maskSize = mask.width
         maskReady = true
     }
 
     private fun invalidateMask() {
         maskReady = false
         maskGen++
+        nextRoi = null
+        lastRoi = null
         segmenter?.reset()
     }
 
-    private fun render(w: Int, h: Int, wFromOut: FloatArray, renderMode: Int) {
+    private fun render(w: Int, h: Int, wFromOut: FloatArray, renderMode: Int, frameTex: Int) {
         GLES30.glViewport(0, 0, w, h)
         GLES30.glUseProgram(program)
 
         GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
-        GLES30.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, oesTex)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, frameTex)
         GLES30.glActiveTexture(GLES30.GL_TEXTURE1)
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, maskTex)
         GLES30.glActiveTexture(GLES30.GL_TEXTURE2)
@@ -551,11 +740,11 @@ class CompositeEngine(context: Context) {
         GLES30.glActiveTexture(GLES30.GL_TEXTURE3)
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, bgTex)
 
-        GLES30.glUniform1i(loc("uCam"), 0)
+        GLES30.glUniform1i(loc("uFrame"), 0)
         GLES30.glUniform1i(loc("uMask"), 1)
         GLES30.glUniform1i(loc("uSmall"), 2)
         GLES30.glUniform1i(loc("uBg"), 3)
-        GLES30.glUniformMatrix4fv(loc("uCamFromW"), 1, false, camFromW, 0)
+        GLES30.glUniformMatrix4fv(loc("uNFromW"), 1, false, nFromW, 0)
         GLES30.glUniformMatrix4fv(loc("uWFromOut"), 1, false, wFromOut, 0)
 
         val effective = if (renderMode == MODE_IMAGE && !bgReady) MODE_BLUR else renderMode
@@ -563,8 +752,13 @@ class CompositeEngine(context: Context) {
         GLES30.glUniform1f(loc("uHasMask"), if (maskReady) 1f else 0f)
         GLES30.glUniform1f(loc("uRefine"), if (refine) 1f else 0f)
         GLES30.glUniform2f(loc("uEdge"), edgeLo, edgeHi)
+        GLES30.glUniform4f(loc("uMaskRect"), maskRect[0], maskRect[1], maskRect[2], maskRect[3])
         GLES30.glUniform2f(
-            loc("uTexel"),
+            loc("uMaskTexel"),
+            (maskRect[2] - maskRect[0]) / maskSize, (maskRect[3] - maskRect[1]) / maskSize
+        )
+        GLES30.glUniform2f(
+            loc("uSmallTexel"),
             if (smallW > 0) 1f / smallW else 0f,
             if (smallH > 0) 1f / smallH else 0f
         )
@@ -591,7 +785,10 @@ class CompositeEngine(context: Context) {
         var sx = 1f; var sy = 1f
         if (bgAspect > worldAspect) sx = worldAspect / bgAspect else sy = bgAspect / worldAspect
         GLES30.glUniform2f(loc("uBgScale"), sx, sy)
+        drawQuad()
+    }
 
+    private fun drawQuad() {
         quad.position(0)
         GLES30.glEnableVertexAttribArray(0)
         GLES30.glVertexAttribPointer(0, 2, GLES30.GL_FLOAT, false, 16, quad)
@@ -602,6 +799,7 @@ class CompositeEngine(context: Context) {
     }
 
     private fun loc(name: String) = locs.getOrPut(name) { GLES30.glGetUniformLocation(program, name) }
+    private fun copyLoc(name: String) = copyLocs.getOrPut(name) { GLES30.glGetUniformLocation(copyProgram, name) }
 
     // ================================================================== setup
 
@@ -628,26 +826,36 @@ class CompositeEngine(context: Context) {
         )
         makeCurrentAny()
 
+        copyProgram = buildProgram(COPY_VERTEX, COPY_FRAGMENT)
         program = buildProgram(VERTEX, FRAGMENT)
-        val t = IntArray(4)
-        GLES30.glGenTextures(4, t, 0)
-        oesTex = t[0]; maskTex = t[1]; bgTex = t[2]; smallTex = t[3]
-        val f = IntArray(1)
-        GLES30.glGenFramebuffers(1, f, 0)
-        fbo = f[0]
+        val t = IntArray(5)
+        GLES30.glGenTextures(5, t, 0)
+        oesTex = t[0]; maskTex = t[1]; bgTex = t[2]; smallTex = t[3]; roiTex = t[4]
+        val f = IntArray(2)
+        GLES30.glGenFramebuffers(2, f, 0)
+        smallFbo = f[0]; roiFbo = f[1]
 
         GLES30.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, oesTex)
         setLinear(GLES11Ext.GL_TEXTURE_EXTERNAL_OES)
-        for (tex in intArrayOf(maskTex, bgTex, smallTex)) {
+        for (tex in intArrayOf(maskTex, bgTex, smallTex, roiTex)) {
             GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, tex)
             setLinear(GLES30.GL_TEXTURE_2D)
         }
-        // 1x1 placeholder so unbound samplers are always valid
-        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, bgTex)
+        // 1x1 placeholders so every sampler is always valid
+        for (tex in intArrayOf(bgTex, maskTex)) {
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, tex)
+            GLES30.glTexImage2D(
+                GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA, 1, 1, 0, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE,
+                ByteBuffer.allocateDirect(4)
+            )
+        }
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, roiTex)
         GLES30.glTexImage2D(
-            GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA, 1, 1, 0, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE,
-            ByteBuffer.allocateDirect(4)
+            GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA, ROI_SIZE, ROI_SIZE, 0, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, null
         )
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, roiFbo)
+        GLES30.glFramebufferTexture2D(GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0, GLES30.GL_TEXTURE_2D, roiTex, 0)
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
     }
 
     private fun makeCurrentAny() {
@@ -683,12 +891,21 @@ class CompositeEngine(context: Context) {
         GLES30.glAttachShader(p, compile(GLES30.GL_VERTEX_SHADER, vs))
         GLES30.glAttachShader(p, compile(GLES30.GL_FRAGMENT_SHADER, fs))
         GLES30.glLinkProgram(p)
+        val ok = IntArray(1)
+        GLES30.glGetProgramiv(p, GLES30.GL_LINK_STATUS, ok, 0)
+        check(ok[0] != 0) { "Program link error: " + GLES30.glGetProgramInfoLog(p) }
         return p
     }
 
     companion object {
         private const val TAG = "CompositeEngine"
         private const val EGL_RECORDABLE_ANDROID = 0x3142
+        /** Frames kept while their masks are computed (enough for ~3 frames of model latency). */
+        private const val RING_SIZE = 4
+        /** Side of the square crop given to the model (it works at 256 internally). */
+        private const val ROI_SIZE = 320
+        /** Never hold a frame longer than this waiting for its mask. */
+        private const val MAX_WAIT_MS = 250L
 
         const val MODE_NONE = 0   // plain camera, no background replacement
         const val MODE_BLUR = 1   // blurred real background
@@ -728,6 +945,26 @@ class CompositeEngine(context: Context) {
             Matrix.translateM(it, 0, -0.5f, -0.5f, 0f)
         }
 
+        private const val COPY_VERTEX = """#version 300 es
+layout(location = 0) in vec2 aPos;
+layout(location = 1) in vec2 aUv;
+uniform mat4 uTexM;
+out vec2 vT;
+void main() {
+    gl_Position = vec4(aPos, 0.0, 1.0);
+    vT = (uTexM * vec4(aUv, 0.0, 1.0)).xy;
+}
+"""
+
+        private const val COPY_FRAGMENT = """#version 300 es
+#extension GL_OES_EGL_image_external_essl3 : require
+precision mediump float;
+in vec2 vT;
+uniform samplerExternalOES uCam;
+out vec4 outColor;
+void main() { outColor = vec4(texture(uCam, vT).rgb, 1.0); }
+"""
+
         private const val VERTEX = """#version 300 es
 layout(location = 0) in vec2 aPos;
 layout(location = 1) in vec2 aUv;
@@ -740,19 +977,20 @@ void main() {
 """
 
         private const val FRAGMENT = """#version 300 es
-#extension GL_OES_EGL_image_external_essl3 : require
 precision highp float;
 in vec2 vW;
-uniform samplerExternalOES uCam;
-uniform sampler2D uMask;
-uniform sampler2D uSmall;
+uniform sampler2D uFrame;   // upright camera frame (natural space), with mipmaps
+uniform sampler2D uMask;    // person mask of the crop uMaskRect, rows top to bottom
+uniform sampler2D uSmall;   // small copy of the picture, for the blur effect
 uniform sampler2D uBg;
-uniform mat4 uCamFromW;
+uniform mat4 uNFromW;
 uniform float uMode;
 uniform float uHasMask;
 uniform float uRefine;
 uniform vec2 uEdge;
-uniform vec2 uTexel;
+uniform vec4 uMaskRect;
+uniform vec2 uMaskTexel;
+uniform vec2 uSmallTexel;
 uniform vec2 uBgScale;
 uniform vec2 uCrop;
 uniform float uPersonScale;
@@ -763,8 +1001,15 @@ uniform float uGain;
 uniform float uWarm;
 out vec4 outColor;
 
-vec3 camAt(vec2 w) { return texture(uCam, (uCamFromW * vec4(w, 0.0, 1.0)).xy).rgb; }
+vec3 camAt(vec2 w) { return texture(uFrame, (uNFromW * vec4(w, 0.0, 1.0)).xy).rgb; }
 vec2 img(vec2 w) { return vec2(w.x, 1.0 - w.y); }
+
+// Person probability at world point w (0 outside the segmented crop).
+float maskAt(vec2 w) {
+    vec2 m = (w - uMaskRect.xy) / (uMaskRect.zw - uMaskRect.xy);
+    if (m.x < 0.0 || m.x > 1.0 || m.y < 0.0 || m.y > 1.0) return 0.0;
+    return texture(uMask, vec2(m.x, 1.0 - m.y)).r;
+}
 
 vec3 adjust(vec3 c) {
     c *= uGain;
@@ -774,7 +1019,12 @@ vec3 adjust(vec3 c) {
 }
 
 void main() {
-    if (uMode > 2.5) { outColor = vec4(camAt(vW), 1.0); return; }
+    if (uMode > 2.5) {
+        // Raw copy (crops for the model, blur source): black outside the picture.
+        bool outside = vW.x < 0.0 || vW.x > 1.0 || vW.y < 0.0 || vW.y > 1.0;
+        outColor = outside ? vec4(0.0, 0.0, 0.0, 1.0) : vec4(camAt(vW), 1.0);
+        return;
+    }
     if (uMode < 0.5) { outColor = vec4(adjust(camAt(vW)), 1.0); return; }
 
     // Where this output pixel falls in the (possibly shrunk and moved) person layer.
@@ -799,9 +1049,9 @@ void main() {
             float mw = 0.0;
             for (int i = -2; i <= 2; i++) {
                 for (int j = -2; j <= 2; j++) {
-                    vec2 w = p + vec2(float(i), float(j)) * uTexel * 0.9;
+                    vec2 w = p + vec2(float(i), float(j)) * uMaskTexel * 0.9;
                     vec3 c = camAt(w);
-                    float mk = texture(uMask, img(w)).r;
+                    float mk = maskAt(w);
                     vec3 d = c - cam;
                     float wt = exp(-dot(d, d) * 40.0);
                     ms += mk * wt;
@@ -821,7 +1071,7 @@ void main() {
             float conf = step(0.5, wf) * step(0.5, wb) * smoothstep(0.01, 0.05, len2);
             m = mix(mBil, aCol, conf * 0.85);
         } else {
-            m = texture(uMask, img(p)).r;
+            m = maskAt(p);
         }
     }
     m = smoothstep(uEdge.x, uEdge.y, m) * inside;
@@ -832,7 +1082,7 @@ void main() {
         vec3 acc = vec3(0.0);
         for (int i = -2; i <= 2; i++) {
             for (int j = -2; j <= 2; j++) {
-                acc += texture(uSmall, t + vec2(float(i), float(j)) * uTexel * 2.5).rgb;
+                acc += texture(uSmall, t + vec2(float(i), float(j)) * uSmallTexel * 2.5).rgb;
             }
         }
         bg = acc / 25.0;
