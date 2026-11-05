@@ -18,9 +18,7 @@ import org.vosk.Model
 import org.vosk.Recognizer
 import java.io.File
 import java.util.Locale
-import kotlin.math.abs
 import kotlin.math.max
-import kotlin.math.sqrt
 
 /** Speaks short prompts out loud through the phone speaker. */
 class Speaker(context: Context) {
@@ -288,48 +286,5 @@ class KeywordSpotter(context: Context, private val onWord: (word: String, atUs: 
         val STOP_WORDS = setOf("stop", "cut")
         private val KEYWORDS = START_WORDS + STOP_WORDS
         private const val GRAMMAR = "[\"start\", \"action\", \"stop\", \"cut\", \"[unk]\"]"
-    }
-}
-
-/**
- * Spots two sharp claps in a row in the recording's own audio, used to stop recording hands-free.
- * Feed 16-bit mono PCM in order; [onDoubleClap] gets the time of the first clap.
- */
-class ClapDetector(private val sampleRate: Int, private val onDoubleClap: (firstClapUs: Long) -> Unit) {
-    private val frame = sampleRate / 100 // 10 ms
-    private var background = 300.0
-    private var lastOnsetUs = -1_000_000L
-    private var firstClapUs = -1L
-    private var cooldownUntilUs = 0L
-
-    fun feed(pcm: ShortArray, n: Int, startUs: Long) {
-        var i = 0
-        while (i + frame <= n) {
-            var peak = 0
-            var sum = 0.0
-            for (k in i until i + frame) {
-                val v = abs(pcm[k].toInt())
-                if (v > peak) peak = v
-                sum += v.toDouble() * v
-            }
-            val rms = sqrt(sum / frame)
-            val t = startUs + i * 1_000_000L / sampleRate
-            val onset = peak > 6500 && rms > background * 7 && t - lastOnsetUs > 90_000
-            if (onset && t >= cooldownUntilUs) {
-                lastOnsetUs = t
-                if (firstClapUs >= 0 && t - firstClapUs in 120_000..750_000) {
-                    val first = firstClapUs
-                    firstClapUs = -1
-                    cooldownUntilUs = t + 2_000_000
-                    onDoubleClap(first)
-                } else {
-                    firstClapUs = t
-                }
-            } else if (!onset) {
-                background = background * 0.97 + rms * 0.03
-                if (background < 100) background = 100.0
-            }
-            i += frame
-        }
     }
 }

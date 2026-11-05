@@ -1,0 +1,9 @@
+<resources>
+    <color name="accent">#FFD54F</color>
+    <color name="record">#FF3B30</color>
+    <color name="glass">#59000000</color>
+    <color name="glass_strong">#B3141417</color>
+    <color name="glass_stroke">#26FFFFFF</color>
+    <color name="text_secondary">#B3FFFFFF</color>
+    <color name="sheet">#1C1C20</color>
+</resources>

@@ -44,6 +44,21 @@ class BackdropStore(private val context: Context) {
 }
 
 object ImageUtils {
+    /** Average colour (r, g, b in 0..1), used to match the person's light to a backdrop. */
+    fun meanColor(bmp: Bitmap): FloatArray {
+        val small = Bitmap.createScaledBitmap(bmp, 32, 32, true)
+        val px = IntArray(32 * 32)
+        small.getPixels(px, 0, 32, 0, 0, 32, 32)
+        if (small !== bmp) small.recycle()
+        var r = 0f; var g = 0f; var b = 0f
+        for (c in px) {
+            r += ((c shr 16) and 0xFF) / 255f
+            g += ((c shr 8) and 0xFF) / 255f
+            b += (c and 0xFF) / 255f
+        }
+        return floatArrayOf(r / px.size, g / px.size, b / px.size)
+    }
+
     /** Decodes an image no larger than [maxSide], honouring EXIF rotation. Works on Android 8+. */
     fun decode(open: () -> InputStream, maxSide: Int): Bitmap? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }

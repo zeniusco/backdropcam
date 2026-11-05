@@ -54,12 +54,12 @@ class AppSettings(context: Context) {
         get() = p.getString("lastVideo", null)
         set(v) = p.edit().putString("lastVideo", v).apply()
 
-    /** Spoken framing guidance, "say start" and "clap twice to stop". */
+    /** Spoken framing guidance plus "start" / "stop" voice commands. */
     var handsFree: Boolean
         get() = p.getBoolean("handsFree", false)
         set(v) = p.edit().putBoolean("handsFree", v).apply()
 
-    /** Open the camera at its widest (zoomed out) view. */
+    /** Back camera: use the ultra-wide (zoomed out) lens when the phone has one. */
     var wideStart: Boolean
         get() = p.getBoolean("wideStart", true)
         set(v) = p.edit().putBoolean("wideStart", v).apply()

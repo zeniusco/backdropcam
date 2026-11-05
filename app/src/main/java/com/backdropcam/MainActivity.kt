@@ -1,13 +1,17 @@
 package com.backdropcam
 
 import android.Manifest
+import android.animation.ObjectAnimator
+import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.ColorStateList
 import android.graphics.Bitmap
 import android.graphics.Outline
+import android.graphics.drawable.GradientDrawable
 import android.media.AudioManager
 import android.media.MediaMetadataRetriever
 import android.media.ToneGenerator
@@ -19,6 +23,8 @@ import android.os.Handler
 import android.os.Looper
 import android.util.TypedValue
 import android.view.GestureDetector
+import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.OrientationEventListener
@@ -37,17 +43,12 @@ import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import androidx.camera.camera2.interop.Camera2CameraInfo
-import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraInfo
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.Preview
 import androidx.camera.core.SurfaceOrientedMeteringPointFactory
-import androidx.camera.core.resolutionselector.AspectRatioStrategy
-import androidx.camera.core.resolutionselector.ResolutionSelector
-import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.constraintlayout.widget.ConstraintLayout
 import androidx.core.content.ContextCompat
@@ -55,75 +56,89 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
-import android.hardware.camera2.CameraCharacteristics
-import kotlin.math.atan
-import kotlin.math.ln
-import kotlin.math.pow
-import kotlin.math.roundToInt
-import kotlin.math.tan
 import androidx.core.view.updatePadding
+import androidx.core.widget.ImageViewCompat
 import com.backdropcam.databinding.ActivityMainBinding
+import com.backdropcam.databinding.DialogScriptBinding
 import com.backdropcam.databinding.SheetMicBinding
 import com.backdropcam.databinding.SheetResultBinding
-import com.backdropcam.databinding.SheetSettingsBinding
 import com.backdropcam.databinding.SheetScriptsBinding
-import com.backdropcam.databinding.DialogScriptBinding
+import com.backdropcam.databinding.SheetSettingsBinding
 import com.google.android.gms.auth.api.identity.AuthorizationRequest
 import com.google.android.gms.auth.api.identity.Identity
 import com.google.android.gms.common.api.Scope
 import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
-import com.google.android.material.snackbar.Snackbar
+import java.io.File
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
-import kotlin.math.abs
+import kotlin.math.ln
 import kotlin.math.max
+import kotlin.math.pow
+import kotlin.math.roundToInt
 
+/**
+ * The camera screen. The heavy lifting lives elsewhere:
+ *  - [CompositeEngine]: camera -> cut-out -> backdrop, on the GPU, to the screen and the encoder
+ *  - [VideoRecorder]:   encodes and saves the MP4
+ *  - [KeywordSpotter], [Speaker], [FramingCoach]: hands-free mode
+ * This class wires the UI to them.
+ */
 class MainActivity : AppCompatActivity() {
 
     private lateinit var ui: ActivityMainBinding
     private lateinit var settings: AppSettings
     private lateinit var engine: CompositeEngine
     private lateinit var backdrops: BackdropStore
+    private lateinit var scripts: ScriptStore
+    private lateinit var speaker: Speaker
+    private lateinit var coach: FramingCoach
+    private lateinit var voice: KeywordSpotter
+
     private val io = Executors.newSingleThreadExecutor()
     private val uploadExecutor = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
 
+    // Camera
     private var camera: Camera? = null
     private var preview: Preview? = null
-    private var recorder: VideoRecorder? = null
-    private var recordStartMs = 0L
-    private var countdown: CountDownTimer? = null
-    private var deviceRotation = 0
-    private var torchOn = false
-    private var pendingWideZoom = false
     private var wideCam: Pair<CameraInfo, Float>? = null
     private var usingWideCam = false
-    private var noWideToastShown = false
+    private var boundFourByThree = false
+    private var torchOn = false
+    private var deviceRotation = 0
     private var cropX = 1f
     private var cropY = 1f
-    private var boundWide43 = false
+    private var noWideHintShown = false
+
+    // Recording
+    private var recorder: VideoRecorder? = null
+    private var countdown: CountDownTimer? = null
+    private var recDotBlink: ObjectAnimator? = null
+    @Volatile private var micGain = 1f
+    @Volatile private var micMuted = false
+    private var micMonitor: MicMonitor? = null
+
+    // Adjust panel
     private var adjustOpen = false
     private var lastFraming: CompositeEngine.Framing? = null
     private var backdropMean: FloatArray? = null
 
     // Teleprompter
-    private lateinit var scripts: ScriptStore
-    private var teleRunning = false
-    private var teleAccum = 0f
     private var teleLastMs = 0L
+    private var teleAccum = 0f
     private var refreshScriptList: (() -> Unit)? = null
+    private var teleRunning = false
+        set(value) {
+            field = value
+            main.removeCallbacks(teleTick)
+            if (value) {
+                teleLastMs = 0L
+                main.post(teleTick)
+            }
+        }
 
-    // Hands-free mode
-    private lateinit var speaker: Speaker
-    private lateinit var coach: FramingCoach
-    private lateinit var voice: KeywordSpotter
-
-    @Volatile private var micGain = 1f
-    @Volatile private var micMuted = false
-    private var micMonitor: MicMonitor? = null
-
-    // Upload / result state
+    // Result / Drive upload
     private var lastVideo: Uri? = null
     private var lastLink: String? = null
     private var uploading = false
@@ -134,8 +149,11 @@ class MainActivity : AppCompatActivity() {
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
             if (grants[Manifest.permission.CAMERA] == true) bindCamera()
-            else toast("BackdropCam needs the camera to work")
+            else hint("BackdropCam needs camera access. Allow it in the phone's app settings.")
         }
+
+    private val pickBackdrop =
+        registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri -> if (uri != null) addBackdrop(uri) }
 
     private val importScript =
         registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -144,21 +162,16 @@ class MainActivity : AppCompatActivity() {
                     val (title, body) = scripts.import(uri)
                     main.post { editScript(null, title, body) }
                 } catch (e: Exception) {
-                    main.post { toast("Could not read that file: ${e.message}") }
+                    main.post { hint("Could not read that file") }
                 }
             }
         }
 
-    private val pickBackdrop =
-        registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri -> if (uri != null) addBackdrop(uri) }
-
     private val authLauncher =
         registerForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
-            val token = try {
+            val token = runCatching {
                 Identity.getAuthorizationClient(this).getAuthorizationResultFromIntent(result.data).accessToken
-            } catch (e: Exception) {
-                null
-            }
+            }.getOrNull()
             if (token != null) upload(token) else uploadFinished(null, "Upload cancelled")
         }
 
@@ -173,86 +186,139 @@ class MainActivity : AppCompatActivity() {
 
         settings = AppSettings(this)
         backdrops = BackdropStore(this)
+        scripts = ScriptStore(this)
         micGain = settings.micGain
         lastVideo = settings.lastVideo?.let(Uri::parse)
 
-        engine = CompositeEngine(this)
-        engine.onGeometry = { w, h -> onCameraGeometry(w, h) }
+        engine = CompositeEngine(this).apply {
+            onGeometry = { w, h -> onCameraGeometry(w, h) }
+            onFraming = { f ->
+                lastFraming = f
+                if (settings.handsFree && recorder == null && countdown == null && !speaker.isSpeaking) coach.update(f)
+            }
+            framingWanted = settings.handsFree
+        }
         speaker = Speaker(this)
         coach = FramingCoach { speak(it) }
         voice = KeywordSpotter(this) { word, atUs -> main.post { onKeyword(word, atUs) } }
         voice.load { ok ->
             main.post {
-                if (!ok && settings.handsFree) toast("Voice commands could not start; guidance still works")
+                if (!ok && settings.handsFree) hint("Voice commands could not start. Guidance still works.")
                 startListening()
             }
-        }
-        engine.framingWanted = settings.handsFree
-        engine.onFraming = { f ->
-            lastFraming = f
-            if (settings.handsFree && recorder == null && countdown == null && !speaker.isSpeaking) coach.update(f)
         }
         applyEngineOptions()
         loadSegmenter()
 
-        // Full-screen camera: hide the status and navigation bars (swipe from an edge to show them).
+        setupWindow()
+        setupPreviewSurface()
+        setupGestures()
+        setupButtons()
+        setupAdjustPanel()
+
+        updateMicUi()
+        updateTimerUi()
+        updateHandsFreeUi()
+        updateTeleUi()
+        ui.aspectChip.text = viewModeLabel()
+        buildBackdropStrip()
+        applyBackdropSelection()
+        lastVideo?.let { loadThumbInto(it, ui.lastThumb, forgetIfMissing = true) }
+        handleShareIntent(intent)
+
+        val needed = mutableListOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
+        if (Build.VERSION.SDK_INT <= 28) needed += Manifest.permission.WRITE_EXTERNAL_STORAGE
+        if (needed.all { granted(it) }) bindCamera() else permissionLauncher.launch(needed.toTypedArray())
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (orientationListener.canDetectOrientation()) orientationListener.enable()
+        startListening()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        orientationListener.disable()
+        cancelCountdown(announce = false)
+        if (recorder != null) stopRecording()
+        micMonitor?.stop()
+        micMonitor = null
+        voice.stop()
+        speaker.stop()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        teleRunning = false
+        voice.close()
+        speaker.shutdown()
+        engine.release()
+        io.shutdown()
+        uploadExecutor.shutdown()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleShareIntent(intent)
+    }
+
+    /** Volume buttons and Bluetooth selfie remotes start / stop recording. */
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN ||
+            keyCode == KeyEvent.KEYCODE_CAMERA
+        ) {
+            if (event.repeatCount == 0) onRecordPressed()
+            return true
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
+    private fun setupWindow() {
+        // Full-screen camera: system bars hidden, swipe from an edge to show them.
         WindowInsetsControllerCompat(window, ui.root).apply {
             hide(WindowInsetsCompat.Type.systemBars())
             systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         }
-        ui.root.addOnLayoutChangeListener { _, l, t, r, b, ol, ot, or, ob ->
-            if (r - l != or - ol || b - t != ob - ot) applyCrop()
-        }
         ViewCompat.setOnApplyWindowInsetsListener(ui.root) { _, insets ->
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
-            ui.topBar.updatePadding(top = bars.top + dp(8))
+            ui.topBar.updatePadding(top = bars.top + dp(10))
             ui.bottomArea.updatePadding(bottom = bars.bottom + dp(8))
             insets
         }
+        ui.root.addOnLayoutChangeListener { _, l, t, r, b, ol, ot, or, ob ->
+            if (r - l != or - ol || b - t != ob - ot) applyCrop()
+        }
+    }
 
+    private fun setupPreviewSurface() {
         ui.surface.holder.addCallback(object : SurfaceHolder.Callback {
             override fun surfaceCreated(holder: SurfaceHolder) {}
             override fun surfaceChanged(holder: SurfaceHolder, format: Int, w: Int, h: Int) {
                 engine.setPreviewSurface(holder.surface, w, h)
             }
-            override fun surfaceDestroyed(holder: SurfaceHolder) {
-                engine.clearPreviewSurface()
-            }
+            override fun surfaceDestroyed(holder: SurfaceHolder) = engine.clearPreviewSurface()
         })
-        setupGestures()
+    }
 
+    private fun setupButtons() {
         ui.settingsBtn.setOnClickListener { showSettings() }
-        ui.micBtn.setOnClickListener { onMicPressed() }
         ui.flashBtn.setOnClickListener { toggleTorch() }
-        ui.handsBtn.setOnClickListener { setHandsFree(!settings.handsFree, announce = true) }
-        ui.timerBtn.setOnClickListener { cycleTimer() }
-        ui.qualityChip.setOnClickListener { cycleQuality() }
         ui.aspectChip.setOnClickListener { cycleViewMode() }
+        ui.qualityChip.setOnClickListener { cycleQuality() }
+        ui.timerChip.setOnClickListener { cycleTimer() }
+        ui.micBtn.setOnClickListener { onMicPressed() }
+        ui.handsBtn.setOnClickListener { setHandsFree(!settings.handsFree) }
         ui.tuneBtn.setOnClickListener { setAdjustOpen(!adjustOpen) }
         ui.teleBtn.setOnClickListener { showScriptsSheet() }
+        // Tap the script to pause / resume scrolling (also handy for rehearsing).
         ui.teleBox.setOnClickListener { teleRunning = !teleRunning }
         ui.teleText.setOnClickListener { teleRunning = !teleRunning }
-        setupAdjustPanel()
+        ui.recordBtn.setOnClickListener { onRecordPressed() }
         ui.pauseBtn.setOnClickListener { togglePause() }
         ui.flipBtn.setOnClickListener { flipCamera() }
-        ui.recordBtn.setOnClickListener { onRecordPressed() }
-        ui.lastThumb.setOnClickListener { lastVideo?.let { showResultSheet(it) } ?: toast("No recordings yet") }
-
-        updateMicIcon()
-        updateTimerUi()
-        updateHandsFreeUi()
-        ui.aspectChip.text = viewModeLabel()
-        scripts = ScriptStore(this)
-        updateTeleUi()
-        main.post(teleTick)
-        handleShareIntent(intent)
-        buildBackdropStrip()
-        applyBackdropSelection()
-        lastVideo?.let { loadThumbInto(it, ui.lastThumb) }
-
-        val needed = mutableListOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
-        if (Build.VERSION.SDK_INT <= 28) needed += Manifest.permission.WRITE_EXTERNAL_STORAGE
-        if (needed.all { granted(it) }) bindCamera() else permissionLauncher.launch(needed.toTypedArray())
+        ui.lastThumb.setOnClickListener { lastVideo?.let { showResultSheet(it) } ?: hint("No recordings yet") }
+        ui.lastThumb.roundCorners(dp(14))
     }
 
     private val orientationListener by lazy {
@@ -275,44 +341,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    override fun onResume() {
-        super.onResume()
-        if (orientationListener.canDetectOrientation()) orientationListener.enable()
-        if (settings.handsFree && recorder == null) startListening()
-    }
-
-    override fun onPause() {
-        super.onPause()
-        orientationListener.disable()
-        cancelCountdown()
-        if (recorder != null) stopRecording()
-        micMonitor?.stop()
-        micMonitor = null
-        voice.stop()
-        speaker.stop()
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        main.removeCallbacks(teleTick)
-        voice.close()
-        speaker.shutdown()
-        engine.release()
-        io.shutdown()
-        uploadExecutor.shutdown()
-    }
-
-    /** Volume buttons and Bluetooth selfie remotes start / stop recording. */
-    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
-        if (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN ||
-            keyCode == KeyEvent.KEYCODE_CAMERA
-        ) {
-            if (event.repeatCount == 0) onRecordPressed()
-            return true
-        }
-        return super.onKeyDown(keyCode, event)
-    }
-
     // ================================================================== camera
 
     private fun bindCamera() {
@@ -321,27 +349,26 @@ class MainActivity : AppCompatActivity() {
             val provider = future.get()
             provider.unbindAll()
             val front = settings.frontCamera
-            wideCam = if (front) null else runCatching { findUltraWide(provider.availableCameraInfos) }.getOrNull()
+            val infos = provider.availableCameraInfos
+            wideCam = if (front) null else runCatching { CameraLenses.findUltraWide(infos) }.getOrNull()
             val wide = wideCam
             usingWideCam = !front && settings.wideStart && wide != null
             val selector = when {
                 front -> CameraSelector.DEFAULT_FRONT_CAMERA
-                usingWideCam && wide != null -> {
-                    val id = cameraId(wide.first)
-                    CameraSelector.Builder().addCameraFilter { list -> list.filter { cameraId(it) == id } }.build()
-                }
+                usingWideCam && wide != null -> CameraLenses.selectorFor(CameraLenses.id(wide.first))
                 else -> CameraSelector.DEFAULT_BACK_CAMERA
             }
-            val info = runCatching { selector.filter(provider.availableCameraInfos).firstOrNull() }.getOrNull()
+            val info = runCatching { selector.filter(infos).firstOrNull() }.getOrNull()
             if (info == null) {
                 if (front) {
                     settings.frontCamera = false
                     bindCamera()
-                } else toast("No camera found")
+                } else hint("No camera found")
                 return@addListener
             }
+            val fourByThree = settings.viewMode == "43"
             val p = Preview.Builder()
-                .setResolutionSelector(highestResolutionSelector(settings.qualityCap, settings.viewMode == "43"))
+                .setResolutionSelector(CameraLenses.resolutionSelector(settings.qualityCap, fourByThree))
                 .setTargetRotation(Surface.ROTATION_0)
                 .build()
             p.setSurfaceProvider(engine.surfaceProvider(front, info.sensorRotationDegrees))
@@ -349,35 +376,14 @@ class MainActivity : AppCompatActivity() {
                 camera = provider.bindToLifecycle(this, selector, p)
                 preview = p
             } catch (e: Exception) {
-                toast("Camera error: ${e.message}")
+                hint("Camera error: ${e.message}")
                 return@addListener
             }
             torchOn = false
-            boundWide43 = settings.viewMode == "43"
+            boundFourByThree = fourByThree
             setupCameraControls()
             updateTeleUi()
         }, ContextCompat.getMainExecutor(this))
-    }
-
-    /** The largest 16:9 camera mode (up to [cap] on the long side) the video encoder can also record. */
-    private fun highestResolutionSelector(cap: Int, fourByThree: Boolean): ResolutionSelector {
-        val ratio = if (fourByThree) 4f / 3f else 16f / 9f
-        return ResolutionSelector.Builder()
-            .setAspectRatioStrategy(
-                if (fourByThree) AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY
-                else AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY
-            )
-            .setResolutionFilter { sizes, _ ->
-                val good = sizes
-                    .filter { max(it.width, it.height) <= cap }
-                    .filter { abs(it.width.toFloat() / it.height - ratio) < 0.02f || abs(it.height.toFloat() / it.width - ratio) < 0.02f }
-                    .filter { VideoRecorder.isSizeSupported(it.width, it.height) }
-                    .sortedByDescending { it.width * it.height }
-                good.ifEmpty { sizes.filter { max(it.width, it.height) <= cap }.sortedByDescending { it.width * it.height } }
-                    .ifEmpty { sizes }
-            }
-            .setResolutionStrategy(ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY)
-            .build()
     }
 
     private fun onCameraGeometry(w: Int, h: Int) {
@@ -394,15 +400,16 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupCameraControls() {
         val cam = camera ?: return
-        ui.flashBtn.visibility = if (cam.cameraInfo.hasFlashUnit()) View.VISIBLE else View.GONE
+        // INVISIBLE (not GONE) keeps the top bar symmetric on cameras without a torch.
+        ui.flashBtn.visibility = if (cam.cameraInfo.hasFlashUnit()) View.VISIBLE else View.INVISIBLE
         ui.flashBtn.setImageResource(R.drawable.ic_flash_off)
         ui.zoomRow.removeAllViews()
-        pendingWideZoom = false
 
+        var checkZoomOut = false
         if (!settings.frontCamera) {
             val wc = wideCam
             if (wc != null) {
-                // Separate ultra-wide camera: switching lens means re-opening the camera.
+                // A separate ultra-wide camera: switching lens re-opens the camera.
                 addLensChip(zoomLabel(wc.second), usingWideCam) {
                     if (!usingWideCam && !busy()) { settings.wideStart = true; bindCamera() }
                 }
@@ -410,14 +417,14 @@ class MainActivity : AppCompatActivity() {
                     if (usingWideCam && !busy()) { settings.wideStart = false; bindCamera() }
                 }
             } else {
-                pendingWideZoom = true // maybe the main camera itself can zoom out; check below
+                checkZoomOut = true // maybe the main camera itself can zoom out below 1x
             }
         }
+        updateLensRowVisibility()
 
         cam.cameraInfo.zoomState.removeObservers(this)
-        cam.cameraInfo.zoomState.observe(this) { zs ->
-            if (camera !== cam || !pendingWideZoom) return@observe
-            pendingWideZoom = false
+        if (checkZoomOut) cam.cameraInfo.zoomState.observe(this) { zs ->
+            if (camera !== cam || ui.zoomRow.childCount > 0) return@observe
             val min = zs.minZoomRatio
             if (min < 0.95f) {
                 if (settings.wideStart) cam.cameraControl.setZoomRatio(min)
@@ -431,9 +438,10 @@ class MainActivity : AppCompatActivity() {
                     cam.cameraControl.setZoomRatio(1f)
                     highlightLens(1)
                 }
-            } else if (settings.wideStart && !noWideToastShown) {
-                noWideToastShown = true
-                toast("This phone does not let apps use its ultra-wide lens")
+                updateLensRowVisibility()
+            } else if (settings.wideStart && !noWideHintShown) {
+                noWideHintShown = true
+                hint("This phone does not let apps use its ultra-wide lens")
             }
         }
         rotateControls(deviceRotation)
@@ -444,51 +452,38 @@ class MainActivity : AppCompatActivity() {
     private fun addLensChip(label: String, active: Boolean, onClick: () -> Unit) {
         val tv = TextView(this).apply {
             text = label
-            textSize = 12f
-            gravity = android.view.Gravity.CENTER
-            setTextColor(if (active) 0xFFFFD54F.toInt() else 0xFFFFFFFF.toInt())
-            background = ContextCompat.getDrawable(context, R.drawable.bg_circle_dark)
-            layoutParams = LinearLayout.LayoutParams(dp(42), dp(42)).apply { marginStart = dp(8); marginEnd = dp(8) }
+            textSize = 13f
+            gravity = Gravity.CENTER
+            minWidth = dp(52)
+            setPadding(dp(10), 0, dp(10), 0)
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(34))
             setOnClickListener { onClick() }
         }
+        styleLensChip(tv, active)
         ui.zoomRow.addView(tv)
         rotateControls(deviceRotation)
     }
 
+    private fun styleLensChip(tv: TextView, active: Boolean) {
+        tv.setTextColor(if (active) 0xFF000000.toInt() else 0xFFFFFFFF.toInt())
+        tv.background = if (active) GradientDrawable().apply {
+            cornerRadius = dp(17).toFloat()
+            setColor(ContextCompat.getColor(this@MainActivity, R.color.accent))
+        } else null
+    }
+
     private fun highlightLens(index: Int) {
         for (i in 0 until ui.zoomRow.childCount) {
-            (ui.zoomRow.getChildAt(i) as? TextView)?.setTextColor(if (i == index) 0xFFFFD54F.toInt() else 0xFFFFFFFF.toInt())
+            (ui.zoomRow.getChildAt(i) as? TextView)?.let { styleLensChip(it, i == index) }
         }
     }
 
-    @androidx.annotation.OptIn(markerClass = [ExperimentalCamera2Interop::class])
-    private fun cameraId(info: CameraInfo): String = Camera2CameraInfo.from(info).cameraId
-
-    /** Horizontal field of view in radians, from the lens focal length and sensor size. */
-    @androidx.annotation.OptIn(markerClass = [ExperimentalCamera2Interop::class])
-    private fun fieldOfView(info: CameraInfo): Float {
-        val c = Camera2CameraInfo.from(info)
-        val focal = c.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.minOrNull() ?: return 0f
-        val sensor = c.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE) ?: return 0f
-        return 2f * atan(max(sensor.width, sensor.height) / (2f * focal))
+    private fun updateLensRowVisibility() {
+        ui.zoomRow.visibility = if (ui.zoomRow.childCount > 0 && !adjustOpen) View.VISIBLE else View.GONE
     }
 
-    /** Finds a back camera clearly wider than the main one. Returns it with its zoom factor (e.g. 0.6). */
-    @androidx.annotation.OptIn(markerClass = [ExperimentalCamera2Interop::class])
-    private fun findUltraWide(infos: List<CameraInfo>): Pair<CameraInfo, Float>? {
-        val main = CameraSelector.DEFAULT_BACK_CAMERA.filter(infos).firstOrNull() ?: return null
-        val mainFov = fieldOfView(main)
-        if (mainFov <= 0f) return null
-        val best = infos
-            .filter { it != main }
-            .filter { Camera2CameraInfo.from(it).getCameraCharacteristic(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK }
-            .maxByOrNull { fieldOfView(it) } ?: return null
-        val fov = fieldOfView(best)
-        if (fov < mainFov * 1.2f) return null
-        return best to (tan(mainFov / 2f) / tan(fov / 2f))
-    }
-
-    /** Fills the screen edge to edge (cropping the camera to the screen's shape) or shows 16:9. */
+    /** FULL fills the screen (the video is cropped to the screen's shape); 16:9 and 4:3 show it all. */
     private fun applyCrop() {
         val nw = engine.naturalWidth
         val nh = engine.naturalHeight
@@ -516,7 +511,7 @@ class MainActivity : AppCompatActivity() {
         else -> "FULL"
     }
 
-    /** FULL (fills the screen) -> 16:9 -> 4:3 (widest the lens can see). */
+    /** FULL -> 16:9 -> 4:3 (the widest view the lens can see). */
     private fun cycleViewMode() {
         if (busy()) return
         settings.viewMode = when (settings.viewMode) {
@@ -525,22 +520,241 @@ class MainActivity : AppCompatActivity() {
             else -> "full"
         }
         ui.aspectChip.text = viewModeLabel()
-        if ((settings.viewMode == "43") != boundWide43) bindCamera() else applyCrop()
-        toast(
+        if ((settings.viewMode == "43") != boundFourByThree) bindCamera() else applyCrop()
+        hint(
             when (settings.viewMode) {
-                "169" -> "16:9: standard video shape"
-                "43" -> "4:3: the widest view this lens can see"
-                else -> "Full screen: video matches your screen shape"
+                "169" -> "16:9, the standard video shape"
+                "43" -> "4:3, the widest view this lens can see"
+                else -> "Full screen, the video matches your screen"
             }
         )
     }
 
-    // ================================================================== adjust panel (size, position, light)
+    private fun cycleQuality() {
+        if (busy()) return
+        settings.quality = when (settings.quality) {
+            "max" -> "1080"
+            "1080" -> "720"
+            else -> "max"
+        }
+        hint(
+            when (settings.quality) {
+                "1080" -> "1080p"
+                "720" -> "720p, smaller files"
+                else -> "Highest quality this camera offers"
+            }
+        )
+        bindCamera()
+    }
+
+    private fun flipCamera() {
+        if (busy()) return
+        settings.frontCamera = !settings.frontCamera
+        ui.flipBtn.animate().rotationBy(180f).setDuration(250).start()
+        bindCamera()
+    }
+
+    private fun toggleTorch() {
+        val cam = camera ?: return
+        torchOn = !torchOn
+        cam.cameraControl.enableTorch(torchOn)
+        ui.flashBtn.setImageResource(if (torchOn) R.drawable.ic_flash_on else R.drawable.ic_flash_off)
+        setActive(ui.flashBtn, torchOn)
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    private fun setupGestures() {
+        val scale = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            override fun onScale(d: ScaleGestureDetector): Boolean {
+                if (adjustOpen) {
+                    settings.personScale = (settings.personScale * d.scaleFactor).coerceIn(0.5f, 1f)
+                    ui.sizeAdjust.value = settings.personScale * 100f
+                    applyPersonAndColor()
+                    return true
+                }
+                val cam = camera ?: return false
+                val cur = cam.cameraInfo.zoomState.value?.zoomRatio ?: 1f
+                cam.cameraControl.setZoomRatio(cur * d.scaleFactor)
+                return true
+            }
+        })
+        val tap = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+            override fun onSingleTapUp(e: MotionEvent): Boolean {
+                focusAt(e.x, e.y)
+                return true
+            }
+
+            override fun onScroll(e1: MotionEvent?, e2: MotionEvent, distanceX: Float, distanceY: Float): Boolean {
+                if (!adjustOpen || e2.pointerCount > 1) return false
+                movePerson(-distanceX / ui.surface.width, -distanceY / ui.surface.height)
+                return true
+            }
+        })
+        ui.surface.setOnTouchListener { _, e ->
+            scale.onTouchEvent(e)
+            if (!scale.isInProgress) tap.onTouchEvent(e)
+            true
+        }
+    }
+
+    private fun focusAt(x: Float, y: Float) {
+        val cam = camera ?: return
+        val p = preview ?: return
+        val pt = engine.previewToCameraPoint(x / ui.surface.width, y / ui.surface.height) ?: return
+        val point = SurfaceOrientedMeteringPointFactory(1f, 1f, p).createPoint(pt[0], pt[1])
+        cam.cameraControl.startFocusAndMetering(
+            FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE)
+                .setAutoCancelDuration(4, TimeUnit.SECONDS)
+                .build()
+        )
+        showFocusRing(ui.surface.left + x, ui.surface.top + y)
+    }
+
+    private fun showFocusRing(x: Float, y: Float) {
+        val r = ui.focusRing
+        r.animate().cancel()
+        r.translationX = x - r.width / 2f
+        r.translationY = y - r.height / 2f
+        r.alpha = 1f
+        r.scaleX = 1.4f
+        r.scaleY = 1.4f
+        r.animate().setStartDelay(0).scaleX(1f).scaleY(1f).setDuration(220).withEndAction {
+            r.animate().setStartDelay(700).alpha(0f).setDuration(300).start()
+        }.start()
+    }
+
+    // ================================================================== cut-out, backdrops, adjust panel
+
+    private fun loadSegmenter() {
+        val hq = settings.highQualityCutout
+        io.execute {
+            try {
+                engine.setSegmenter(PersonSegmenter(this, hq))
+            } catch (e: Exception) {
+                main.post { hint("Could not load the cut-out model") }
+            }
+        }
+    }
+
+    private fun applyEngineOptions() {
+        engine.setOptions(settings.mirrorFront, settings.highQualityCutout, settings.softness)
+    }
+
+    private fun buildBackdropStrip() {
+        val strip = ui.backdropStrip
+        strip.removeAllViews()
+        strip.addView(stripTile(KEY_NONE, null, R.drawable.ic_block, "None"))
+        strip.addView(stripTile(KEY_BLUR, null, R.drawable.ic_blur_on, "Blur"))
+        strip.addView(stripTile(KEY_ADD, null, R.drawable.ic_add, "Add"))
+        for (f in backdrops.list()) strip.addView(stripTile(f.name, f, 0, null))
+        highlightSelection()
+        rotateControls(deviceRotation)
+    }
+
+    /** A square tile: a backdrop image, or an icon with a small label (None / Blur / Add). */
+    private fun stripTile(key: String, file: File?, icon: Int, label: String?): View {
+        val tile = FrameLayout(this).apply {
+            tag = key
+            layoutParams = LinearLayout.LayoutParams(dp(60), dp(60)).apply { marginEnd = dp(10) }
+            background = ContextCompat.getDrawable(context, R.drawable.bg_item)
+            contentDescription = label ?: "Backdrop"
+            roundCorners(dp(16))
+        }
+        if (file != null) {
+            val iv = ImageView(this).apply {
+                layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+                scaleType = ImageView.ScaleType.CENTER_CROP
+            }
+            tile.addView(iv)
+            io.execute {
+                val t = backdrops.thumbnail(file)
+                main.post { iv.setImageBitmap(t) }
+            }
+        } else {
+            val col = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+            }
+            col.addView(ImageView(this).apply {
+                setImageResource(icon)
+                layoutParams = LinearLayout.LayoutParams(dp(22), dp(22))
+            })
+            col.addView(TextView(this).apply {
+                text = label
+                textSize = 10f
+                setTextColor(0xCCFFFFFF.toInt())
+                setPadding(0, dp(2), 0, 0)
+            })
+            tile.addView(col)
+        }
+        tile.setOnClickListener {
+            if (key == KEY_ADD) {
+                pickBackdrop.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+            } else {
+                settings.backdrop = key
+                applyBackdropSelection()
+            }
+        }
+        if (file != null) tile.setOnLongClickListener {
+            MaterialAlertDialogBuilder(this)
+                .setTitle("Remove this backdrop?")
+                .setPositiveButton("Remove") { _, _ ->
+                    backdrops.delete(key)
+                    if (settings.backdrop == key) settings.backdrop = KEY_BLUR
+                    buildBackdropStrip()
+                    applyBackdropSelection()
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+            true
+        }
+        return tile
+    }
+
+    private fun highlightSelection() {
+        val sel = settings.backdrop
+        for (i in 0 until ui.backdropStrip.childCount) {
+            val v = ui.backdropStrip.getChildAt(i) as FrameLayout
+            v.foreground = if (v.tag == sel) ContextCompat.getDrawable(this, R.drawable.fg_selected) else null
+        }
+    }
+
+    private fun applyBackdropSelection() {
+        highlightSelection()
+        when (val key = settings.backdrop) {
+            KEY_NONE -> engine.setMode(CompositeEngine.MODE_NONE)
+            KEY_BLUR -> engine.setMode(CompositeEngine.MODE_BLUR)
+            else -> io.execute {
+                val bmp = backdrops.load(key)
+                if (bmp != null) {
+                    backdropMean = ImageUtils.meanColor(bmp)
+                    engine.setBackdrop(bmp)
+                } else main.post {
+                    settings.backdrop = KEY_BLUR
+                    applyBackdropSelection()
+                }
+            }
+        }
+    }
+
+    private fun addBackdrop(uri: Uri) {
+        io.execute {
+            try {
+                val f = backdrops.add(uri)
+                main.post {
+                    settings.backdrop = f.name
+                    buildBackdropStrip()
+                    applyBackdropSelection()
+                }
+            } catch (e: Exception) {
+                main.post { hint("Could not use that image") }
+            }
+        }
+    }
 
     private fun setupAdjustPanel() {
-        ui.sizeAdjust.value = (settings.personScale * 100f).coerceIn(50f, 100f)
-        ui.brightAdjust.value = settings.brightness.coerceIn(-1f, 1f)
-        ui.warmAdjust.value = settings.warmth.coerceIn(-1f, 1f)
+        syncAdjustSliders()
         ui.sizeAdjust.addOnChangeListener { _, v, fromUser ->
             if (fromUser) { settings.personScale = v / 100f; applyPersonAndColor() }
         }
@@ -572,11 +786,14 @@ class MainActivity : AppCompatActivity() {
         engine.setColorAdjust(2f.pow(settings.brightness), settings.warmth)
     }
 
+    /** The adjust panel replaces the lens switch and backdrop strip while open, to save space. */
     private fun setAdjustOpen(open: Boolean) {
         adjustOpen = open
         ui.adjustPanel.visibility = if (open) View.VISIBLE else View.GONE
-        ui.tuneBtn.setColorFilter(if (open) 0xFFFFD54F.toInt() else 0xFFFFFFFF.toInt())
-        if (open && settings.backdrop == KEY_NONE) toast("Pick a backdrop or Blur to resize yourself")
+        ui.stripScroll.visibility = if (open) View.GONE else View.VISIBLE
+        updateLensRowVisibility()
+        setActive(ui.tuneBtn, open)
+        if (open && settings.backdrop == KEY_NONE) hint("Pick a backdrop to resize or move yourself")
     }
 
     /** Moves the person by a drag on the screen (fractions of the screen, y down). */
@@ -600,9 +817,9 @@ class MainActivity : AppCompatActivity() {
         val bg = backdropMean
         val f = lastFraming
         if (bg == null || settings.backdrop == KEY_NONE || settings.backdrop == KEY_BLUR) {
-            return toast("Choose a backdrop image first")
+            return hint("Choose a backdrop image first")
         }
-        if (f == null || f.coverage < 0.02f) return toast("Step into the frame first")
+        if (f == null || f.coverage < 0.02f) return hint("Step into the frame first")
         fun lum(r: Float, g: Float, b: Float) = 0.299f * r + 0.587f * g + 0.114f * b
         val lp = lum(f.meanR, f.meanG, f.meanB).coerceAtLeast(0.02f)
         val lb = lum(bg[0], bg[1], bg[2]).coerceAtLeast(0.02f)
@@ -613,228 +830,26 @@ class MainActivity : AppCompatActivity() {
         settings.warmth = ((tb - tp) * 3f).coerceIn(-1f, 1f)
         syncAdjustSliders()
         applyPersonAndColor()
-        toast("Matched to the backdrop. Fine-tune with the sliders.")
-    }
-
-    @SuppressLint("ClickableViewAccessibility")
-    private fun setupGestures() {
-        val scale = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
-            override fun onScale(d: ScaleGestureDetector): Boolean {
-                if (adjustOpen) {
-                    settings.personScale = (settings.personScale * d.scaleFactor).coerceIn(0.5f, 1f)
-                    ui.sizeAdjust.value = settings.personScale * 100f
-                    applyPersonAndColor()
-                    return true
-                }
-                val cam = camera ?: return false
-                val cur = cam.cameraInfo.zoomState.value?.zoomRatio ?: 1f
-                cam.cameraControl.setZoomRatio(cur * d.scaleFactor)
-                return true
-            }
-        })
-        val tap = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
-            override fun onSingleTapUp(e: MotionEvent): Boolean {
-                focusAt(e.x / ui.surface.width, e.y / ui.surface.height)
-                return true
-            }
-
-            override fun onScroll(e1: MotionEvent?, e2: MotionEvent, distanceX: Float, distanceY: Float): Boolean {
-                if (!adjustOpen || e2.pointerCount > 1) return false
-                movePerson(-distanceX / ui.surface.width, -distanceY / ui.surface.height)
-                return true
-            }
-        })
-        ui.surface.setOnTouchListener { _, e ->
-            scale.onTouchEvent(e)
-            if (!scale.isInProgress) tap.onTouchEvent(e)
-            true
-        }
-    }
-
-    private fun focusAt(x: Float, y: Float) {
-        val cam = camera ?: return
-        val p = preview ?: return
-        val pt = engine.previewToCameraPoint(x, y) ?: return
-        val point = SurfaceOrientedMeteringPointFactory(1f, 1f, p).createPoint(pt[0], pt[1])
-        val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE)
-            .setAutoCancelDuration(4, TimeUnit.SECONDS)
-            .build()
-        cam.cameraControl.startFocusAndMetering(action)
-    }
-
-    private fun flipCamera() {
-        if (busy()) return
-        settings.frontCamera = !settings.frontCamera
-        bindCamera()
-    }
-
-    private fun toggleTorch() {
-        val cam = camera ?: return
-        torchOn = !torchOn
-        cam.cameraControl.enableTorch(torchOn)
-        ui.flashBtn.setImageResource(if (torchOn) R.drawable.ic_flash_on else R.drawable.ic_flash_off)
-    }
-
-    private fun cycleQuality() {
-        if (busy()) return
-        settings.quality = when (settings.quality) {
-            "max" -> "1080"
-            "1080" -> "720"
-            else -> "max"
-        }
-        toast(
-            when (settings.quality) {
-                "1080" -> "Quality: 1080p"
-                "720" -> "Quality: 720p (smaller files)"
-                else -> "Quality: highest available"
-            }
-        )
-        bindCamera()
-    }
-
-    // ================================================================== segmentation / backdrops
-
-    private fun loadSegmenter() {
-        val hq = settings.highQualityCutout
-        io.execute {
-            try {
-                engine.setSegmenter(PersonSegmenter(this, hq))
-            } catch (e: Exception) {
-                main.post { toast("Could not load cut-out model: ${e.message}") }
-            }
-        }
-    }
-
-    private fun applyEngineOptions() {
-        engine.setOptions(settings.mirrorFront, settings.highQualityCutout, settings.softness)
-    }
-
-    private fun buildBackdropStrip() {
-        val strip = ui.backdropStrip
-        strip.removeAllViews()
-        strip.addView(stripItem(KEY_NONE, null, R.drawable.ic_block, "No effect"))
-        strip.addView(stripItem(KEY_BLUR, null, R.drawable.ic_blur_on, "Blur background"))
-        strip.addView(stripItem(KEY_ADD, null, R.drawable.ic_add, "Add backdrop"))
-        for (f in backdrops.list()) {
-            val item = stripItem(f.name, f, 0, "Backdrop")
-            strip.addView(item)
-        }
-        highlightSelection()
-        rotateControls(deviceRotation)
-    }
-
-    private fun stripItem(key: String, file: java.io.File?, icon: Int, description: String): View {
-        val size = dp(58)
-        val frame = FrameLayout(this).apply {
-            tag = key
-            layoutParams = LinearLayout.LayoutParams(size, size).apply { marginEnd = dp(10) }
-            background = ContextCompat.getDrawable(context, R.drawable.bg_item)
-            contentDescription = description
-            outlineProvider = object : ViewOutlineProvider() {
-                override fun getOutline(view: View, outline: Outline) {
-                    outline.setRoundRect(0, 0, view.width, view.height, dp(14).toFloat())
-                }
-            }
-            clipToOutline = true
-        }
-        val iv = ImageView(this).apply {
-            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
-            if (file != null) {
-                scaleType = ImageView.ScaleType.CENTER_CROP
-                io.execute {
-                    val t = backdrops.thumbnail(file)
-                    main.post { setImageBitmap(t) }
-                }
-            } else {
-                scaleType = ImageView.ScaleType.CENTER
-                setImageResource(icon)
-            }
-        }
-        frame.addView(iv)
-        frame.setOnClickListener {
-            if (key == KEY_ADD) {
-                pickBackdrop.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-            } else {
-                settings.backdrop = key
-                applyBackdropSelection()
-            }
-        }
-        if (file != null) {
-            frame.setOnLongClickListener {
-                MaterialAlertDialogBuilder(this)
-                    .setTitle("Remove this backdrop?")
-                    .setPositiveButton("Remove") { _, _ ->
-                        backdrops.delete(key)
-                        if (settings.backdrop == key) settings.backdrop = KEY_BLUR
-                        buildBackdropStrip()
-                        applyBackdropSelection()
-                    }
-                    .setNegativeButton("Cancel", null)
-                    .show()
-                true
-            }
-        }
-        return frame
-    }
-
-    private fun highlightSelection() {
-        val sel = settings.backdrop
-        val strip = ui.backdropStrip
-        for (i in 0 until strip.childCount) {
-            val v = strip.getChildAt(i) as FrameLayout
-            v.foreground = if (v.tag == sel) ContextCompat.getDrawable(this, R.drawable.fg_selected) else null
-        }
-    }
-
-    private fun applyBackdropSelection() {
-        highlightSelection()
-        when (val key = settings.backdrop) {
-            KEY_NONE -> engine.setMode(CompositeEngine.MODE_NONE)
-            KEY_BLUR -> engine.setMode(CompositeEngine.MODE_BLUR)
-            else -> io.execute {
-                val bmp = backdrops.load(key)
-                if (bmp != null) {
-                    backdropMean = meanColor(bmp)
-                    engine.setBackdrop(bmp)
-                }
-                else main.post {
-                    settings.backdrop = KEY_BLUR
-                    applyBackdropSelection()
-                }
-            }
-        }
-    }
-
-    private fun addBackdrop(uri: Uri) {
-        io.execute {
-            try {
-                val f = backdrops.add(uri)
-                main.post {
-                    settings.backdrop = f.name
-                    buildBackdropStrip()
-                    applyBackdropSelection()
-                }
-            } catch (e: Exception) {
-                main.post { toast("Could not use that image") }
-            }
-        }
+        hint("Matched to the backdrop's light")
     }
 
     // ================================================================== recording
 
     private fun busy(): Boolean {
         if (recorder != null || countdown != null) {
-            toast("Not while recording")
+            hint("Not while recording")
             return true
         }
         return false
     }
 
     private fun onRecordPressed() {
+        ui.recordBtn.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
         when {
             recorder != null -> stopRecording()
             countdown != null -> cancelCountdown()
-            settings.timer > 0 || settings.handsFree -> startCountdown(max(settings.timer, if (settings.handsFree) 3 else 0))
+            settings.handsFree -> startCountdown(max(settings.timer, 3))
+            settings.timer > 0 -> startCountdown(settings.timer)
             else -> startRecording()
         }
     }
@@ -848,8 +863,12 @@ class MainActivity : AppCompatActivity() {
             override fun onTick(msLeft: Long) {
                 val n = ((msLeft + 999) / 1000).toString()
                 ui.countdownText.text = n
+                ui.countdownText.scaleX = 1.3f
+                ui.countdownText.scaleY = 1.3f
+                ui.countdownText.animate().scaleX(1f).scaleY(1f).setDuration(250).start()
                 if (spoken) speak(n) else tone?.startTone(ToneGenerator.TONE_PROP_BEEP, 120)
             }
+
             override fun onFinish() {
                 tone?.release()
                 countdown = null
@@ -859,79 +878,77 @@ class MainActivity : AppCompatActivity() {
         }.start()
     }
 
-    private fun cancelCountdown() {
-        if (countdown != null && settings.handsFree) {
-            speak("Cancelled.") { startListening() }
-        }
+    private fun cancelCountdown(announce: Boolean = true) {
+        if (countdown == null) return
         countdown?.cancel()
         countdown = null
         ui.countdownText.visibility = View.GONE
         if (recorder == null) setShutter(false)
+        if (announce && settings.handsFree) speak("Cancelled.")
     }
 
     private fun startRecording() {
         val nw = engine.naturalWidth
         val nh = engine.naturalHeight
-        if (nw == 0 || nh == 0) return toast("Camera is not ready yet")
+        if (nw == 0 || nh == 0) return hint("Camera is not ready yet")
         val rotation = deviceRotation
         val cw = (nw * cropX).roundToInt() and 1.inv()
         val ch = (nh * cropY).roundToInt() and 1.inv()
         val (ww, wh) = if (rotation % 180 == 0) cw to ch else ch to cw
         val size = VideoRecorder.pickEncoderSize(ww, wh)
         val audio = settings.micOn && granted(Manifest.permission.RECORD_AUDIO)
-        micMonitor?.stop(); micMonitor = null
-        voice.stop() // release the microphone for the recorder
+        val listenForStop = settings.handsFree && audio
+
+        micMonitor?.stop()
+        micMonitor = null
+        voice.stop() // free the microphone for the recorder
         voice.reset()
         voice.mutedUntil = 0L
         speaker.stop()
         micMuted = false
-        var recRef: VideoRecorder? = null
-        val clap = if (settings.handsFree && audio) {
-            ClapDetector(VideoRecorder.SAMPLE_RATE) { firstClapUs ->
-                val r = recRef ?: return@ClapDetector
-                // Cut the recording just before the claps so they are not in the video.
-                r.cutoffUs = max(0L, firstClapUs - 300_000L)
-                main.post { if (recorder === r) stopRecording() }
-            }
-        } else null
         try {
             val rec = VideoRecorder(
                 this, size.width, size.height, audio,
                 gain = { micGain },
                 muted = { micMuted },
                 onLevel = { level -> main.post { ui.levelBar.progress = (level * 100).toInt() } },
-                onPcm = if (settings.handsFree && audio) { pcm: ShortArray, n: Int, t: Long ->
-                    clap?.feed(pcm, n, t)
-                    voice.feed48k(pcm, n, t) // "stop" / "cut" while recording
-                } else null,
+                // In hands-free mode the recording's own sound is checked for "stop".
+                onPcm = if (listenForStop) { pcm: ShortArray, n: Int, t: Long -> voice.feed48k(pcm, n, t) } else null,
             )
-            recRef = rec
             rec.start()
             engine.startRecording(rec.inputSurface, size.width, size.height, rotation, { rec.ptsNs() }, { rec.paused })
             recorder = rec
         } catch (e: Exception) {
             setShutter(false)
-            return toast("Cannot start recording: ${e.message}")
+            return hint("Cannot start recording: ${e.message}")
         }
-        recordStartMs = System.currentTimeMillis()
+
         setShutter(true)
         ui.recPill.visibility = View.VISIBLE
+        ui.recPill.alpha = 1f
+        ui.quickRow.visibility = View.INVISIBLE
+        ui.levelBar.visibility = if (audio) View.VISIBLE else View.GONE
+        recDotBlink = ObjectAnimator.ofFloat(ui.recDot, View.ALPHA, 1f, 0.25f).apply {
+            duration = 650
+            repeatMode = ValueAnimator.REVERSE
+            repeatCount = ValueAnimator.INFINITE
+            start()
+        }
+        ui.flipBtn.visibility = View.GONE
+        ui.pauseBtn.visibility = View.VISIBLE
+        ui.pauseBtn.setImageResource(R.drawable.ic_pause)
         if (ui.teleBox.visibility == View.VISIBLE) {
             ui.teleScroll.scrollTo(0, 0)
             teleRunning = true
         }
-        ui.levelBar.visibility = if (audio) View.VISIBLE else View.GONE
-        ui.flipBtn.visibility = View.GONE
-        ui.pauseBtn.visibility = View.VISIBLE
-        ui.pauseBtn.setImageResource(R.drawable.ic_pause)
         setControlsEnabled(false)
-        updateMicIcon()
+        updateMicUi()
         tickTimer()
     }
 
     private fun tickTimer() {
         val rec = recorder ?: return
-        tickTimerOnce()
+        updateRecTime(rec)
         val limit = settings.autoStop
         if (limit > 0 && rec.ptsNs() / 1_000_000_000L >= limit) {
             stopRecording()
@@ -940,17 +957,43 @@ class MainActivity : AppCompatActivity() {
         main.postDelayed({ tickTimer() }, 250)
     }
 
+    private fun updateRecTime(rec: VideoRecorder) {
+        val s = rec.ptsNs() / 1_000_000_000L
+        var t = String.format("%02d:%02d", s / 60, s % 60)
+        val limit = settings.autoStop
+        if (limit > 0) t += String.format(" / %02d:%02d", limit / 60, limit % 60)
+        ui.recTime.text = if (rec.paused) "$t  Paused" else t
+    }
+
+    private fun togglePause() {
+        val rec = recorder ?: return
+        if (rec.paused) {
+            rec.resume()
+            recDotBlink?.resume()
+            if (ui.teleBox.visibility == View.VISIBLE) teleRunning = true
+            ui.pauseBtn.setImageResource(R.drawable.ic_pause)
+        } else {
+            rec.pause()
+            recDotBlink?.pause()
+            teleRunning = false
+            ui.pauseBtn.setImageResource(R.drawable.ic_play_arrow)
+        }
+        updateRecTime(rec)
+    }
+
     private fun stopRecording() {
         val rec = recorder ?: return
         recorder = null
         setShutter(false)
+        recDotBlink?.cancel()
+        recDotBlink = null
         ui.recPill.visibility = View.GONE
-        ui.recPill.alpha = 1f
+        ui.quickRow.visibility = View.VISIBLE
         ui.pauseBtn.visibility = View.GONE
-        teleRunning = false
         ui.flipBtn.visibility = View.VISIBLE
+        teleRunning = false
         setControlsEnabled(true)
-        updateMicIcon()
+        updateMicUi()
         engine.stopRecording {
             io.execute {
                 try {
@@ -958,8 +1001,8 @@ class MainActivity : AppCompatActivity() {
                     main.post { onVideoSaved(uri, rec) }
                 } catch (e: Exception) {
                     main.post {
-                        toast("Save failed: ${e.message}")
-                        if (settings.handsFree) speak("Sorry, saving failed.") { startListening() }
+                        hint("Could not save the video: ${e.message}")
+                        if (settings.handsFree) speak("Sorry, saving failed.")
                     }
                 }
             }
@@ -974,56 +1017,23 @@ class MainActivity : AppCompatActivity() {
         settings.lastVideo = uri.toString()
         loadThumbInto(uri, ui.lastThumb)
         if (isFinishing || isDestroyed) return
-        showResultSheet(uri, "${rec.width}x${rec.height}  saved to Movies/BackdropCam")
+        showResultSheet(uri, "${rec.width} × ${rec.height} · Movies/BackdropCam")
         if (settings.autoUpload) startUpload()
-        if (settings.handsFree) {
-            speak("Saved. Say start to record again.") {
-                coach.reset()
-                startListening()
-            }
-        }
+        if (settings.handsFree) speak("Saved. Say start to record again.") { coach.reset() }
     }
 
-    private fun togglePause() {
-        val rec = recorder ?: return
-        if (rec.paused) {
-            rec.resume()
-            if (ui.teleBox.visibility == View.VISIBLE) teleRunning = true
-            ui.pauseBtn.setImageResource(R.drawable.ic_pause)
-            ui.recPill.alpha = 1f
-        } else {
-            rec.pause()
-            teleRunning = false
-            ui.pauseBtn.setImageResource(R.drawable.ic_play_arrow)
-            ui.recPill.alpha = 0.7f
-        }
-        tickTimerOnce()
-    }
-
-    private fun tickTimerOnce() {
-        val rec = recorder ?: return
-        val s = rec.ptsNs() / 1_000_000_000L
-        var t = String.format("%02d:%02d", s / 60, s % 60)
-        val limit = settings.autoStop
-        if (limit > 0) t += String.format(" / %02d:%02d", limit / 60, limit % 60)
-        ui.recTime.text = if (rec.paused) "$t  Paused" else t
-    }
-
-    /** Big red circle when idle; small rounded "stop" square while recording, like the system camera. */
+    /** Red circle when idle; it shrinks into a rounded "stop" square while recording. */
     private fun setShutter(recording: Boolean) {
-        val lp = ui.recordInner.layoutParams
-        val size = dp(if (recording) 32 else 64)
-        lp.width = size
-        lp.height = size
-        ui.recordInner.layoutParams = lp
         ui.recordInner.background = ContextCompat.getDrawable(
             this, if (recording) R.drawable.shutter_recording else R.drawable.shutter_idle
         )
+        val s = if (recording) 0.5f else 1f
+        ui.recordInner.animate().scaleX(s).scaleY(s).setDuration(180).start()
     }
 
     private fun setControlsEnabled(enabled: Boolean) {
         val alpha = if (enabled) 1f else 0.35f
-        for (v in listOf(ui.settingsBtn, ui.flipBtn, ui.qualityChip, ui.aspectChip, ui.timerBtn, ui.lastThumb, ui.zoomRow)) {
+        for (v in listOf(ui.settingsBtn, ui.lastThumb, ui.zoomRow, ui.stripScroll)) {
             v.isEnabled = enabled
             v.alpha = alpha
         }
@@ -1036,13 +1046,17 @@ class MainActivity : AppCompatActivity() {
             else -> 0
         }
         updateTimerUi()
-        toast(if (settings.timer == 0) "Timer off" else "Recording starts ${settings.timer}s after you press record")
+        hint(if (settings.timer == 0) "Timer off" else "Recording starts ${settings.timer}s after you press record")
     }
 
     private fun updateTimerUi() {
         val t = settings.timer
-        ui.timerBtn.setImageResource(if (t == 0) R.drawable.ic_timer_off else R.drawable.ic_timer)
-        ui.timerBadge.text = if (t == 0) "" else "${t}s"
+        ui.timerChip.text = if (t == 0) "" else "${t}s"
+        ui.timerChip.compoundDrawablePadding = if (t == 0) 0 else dp(4)
+        ui.timerChip.setCompoundDrawablesRelativeWithIntrinsicBounds(
+            if (t == 0) R.drawable.ic_timer_off else R.drawable.ic_timer, 0, 0, 0
+        )
+        ui.timerChip.setTextColor(if (t == 0) 0xFFFFFFFF.toInt() else ContextCompat.getColor(this, R.color.accent))
     }
 
     // ================================================================== microphone
@@ -1050,16 +1064,20 @@ class MainActivity : AppCompatActivity() {
     private fun onMicPressed() {
         if (recorder != null) {
             micMuted = !micMuted
-            updateMicIcon()
-            toast(if (micMuted) "Mic muted" else "Mic on")
+            updateMicUi()
+            hint(if (micMuted) "Mic muted" else "Mic on")
         } else {
             showMicSheet()
         }
     }
 
-    private fun updateMicIcon() {
+    private fun updateMicUi() {
         val off = if (recorder != null) micMuted else !settings.micOn
         ui.micBtn.setImageResource(if (off) R.drawable.ic_mic_off else R.drawable.ic_mic)
+        ImageViewCompat.setImageTintList(
+            ui.micBtn,
+            ColorStateList.valueOf(if (off) ContextCompat.getColor(this, R.color.record) else 0xFFFFFFFF.toInt())
+        )
     }
 
     private fun showMicSheet() {
@@ -1067,18 +1085,18 @@ class MainActivity : AppCompatActivity() {
         val dlg = BottomSheetDialog(this)
         dlg.setContentView(b.root)
         b.micSwitch.isChecked = settings.micOn
-        b.gainSlider.value = (settings.micGain * 100f).coerceIn(0f, 200f).let { (it / 5f).toInt() * 5f }
+        b.gainSlider.value = ((settings.micGain * 100f).coerceIn(0f, 200f) / 5f).roundToInt() * 5f
         b.gainValue.text = "${b.gainSlider.value.toInt()}%"
         b.micSwitch.setOnCheckedChangeListener { _, on ->
             settings.micOn = on
-            updateMicIcon()
+            updateMicUi()
         }
         b.gainSlider.addOnChangeListener { _, value, _ ->
             micGain = value / 100f
             settings.micGain = micGain
             b.gainValue.text = "${value.toInt()}%"
         }
-        voice.stop()
+        voice.stop() // the level test needs the microphone
         if (granted(Manifest.permission.RECORD_AUDIO)) {
             micMonitor = MicMonitor({ micGain }) { level ->
                 main.post { b.levelMeter.setProgressCompat((level * 100).toInt(), true) }
@@ -1087,7 +1105,7 @@ class MainActivity : AppCompatActivity() {
         dlg.setOnDismissListener {
             micMonitor?.stop()
             micMonitor = null
-            if (settings.handsFree && recorder == null) startListening()
+            startListening()
         }
         dlg.show()
     }
@@ -1100,23 +1118,19 @@ class MainActivity : AppCompatActivity() {
         val dlg = BottomSheetDialog(this)
         dlg.setContentView(b.root)
 
-        b.qualityGroup.check(
-            when (settings.quality) {
-                "1080" -> R.id.q1080
-                "720" -> R.id.q720
-                else -> R.id.qMax
-            }
+        val stopIds = mapOf(
+            0 to R.id.as0, 30 to R.id.as30, 60 to R.id.as60, 90 to R.id.as90,
+            120 to R.id.as120, 150 to R.id.as150, 180 to R.id.as180
         )
-        b.qualityGroup.setOnCheckedStateChangeListener { _, ids ->
-            val q = when (ids.firstOrNull()) {
-                R.id.q1080 -> "1080"
-                R.id.q720 -> "720"
-                else -> "max"
-            }
-            if (q != settings.quality) {
-                settings.quality = q
-                bindCamera()
-            }
+        b.autoStopGroup.check(stopIds[settings.autoStop] ?: R.id.as0)
+        b.autoStopGroup.setOnCheckedStateChangeListener { _, ids ->
+            settings.autoStop = stopIds.entries.firstOrNull { it.value == ids.firstOrNull() }?.key ?: 0
+        }
+
+        b.mirrorSwitch.isChecked = settings.mirrorFront
+        b.mirrorSwitch.setOnCheckedChangeListener { _, on ->
+            settings.mirrorFront = on
+            applyEngineOptions()
         }
 
         b.modelGroup.check(if (settings.highQualityCutout) R.id.mHq else R.id.mFast)
@@ -1134,42 +1148,24 @@ class MainActivity : AppCompatActivity() {
             settings.softness = v
             applyEngineOptions()
         }
-        b.mirrorSwitch.isChecked = settings.mirrorFront
-        b.mirrorSwitch.setOnCheckedChangeListener { _, on ->
-            settings.mirrorFront = on
-            applyEngineOptions()
-        }
-        b.wideSwitch.isChecked = settings.wideStart
-        b.wideSwitch.setOnCheckedChangeListener { _, on ->
-            settings.wideStart = on
-            if (!settings.frontCamera) bindCamera()
-        }
-        b.handsFreeSwitch.isChecked = settings.handsFree
-        b.handsFreeSwitch.setOnCheckedChangeListener { _, on -> setHandsFree(on, announce = true) }
-        val stopIds = mapOf(0 to R.id.as0, 30 to R.id.as30, 60 to R.id.as60, 90 to R.id.as90, 120 to R.id.as120, 150 to R.id.as150, 180 to R.id.as180)
-        b.autoStopGroup.check(stopIds[settings.autoStop] ?: R.id.as0)
-        b.autoStopGroup.setOnCheckedStateChangeListener { _, ids ->
-            settings.autoStop = stopIds.entries.firstOrNull { it.value == ids.firstOrNull() }?.key ?: 0
-        }
+
         b.autoUploadSwitch.isChecked = settings.autoUpload
         b.autoUploadSwitch.setOnCheckedChangeListener { _, on -> settings.autoUpload = on }
         dlg.show()
     }
 
-    // ================================================================== result sheet and Drive
+    // ================================================================== result sheet and Google Drive
 
     private fun showResultSheet(uri: Uri, details: String? = null) {
         val b = SheetResultBinding.inflate(layoutInflater)
         val dlg = BottomSheetDialog(this)
         dlg.setContentView(b.root)
         resultUi = b
-        b.details.text = details ?: "Saved to Movies/BackdropCam"
+        b.details.text = details ?: "Movies/BackdropCam"
+        b.thumb.roundCorners(dp(16))
         loadThumbInto(uri, b.thumb)
         b.playBtn.setOnClickListener {
-            startActivitySafe(
-                Intent(Intent.ACTION_VIEW).setDataAndType(uri, "video/mp4")
-                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            )
+            startActivitySafe(Intent(Intent.ACTION_VIEW).setDataAndType(uri, "video/mp4").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
         }
         b.shareVideoBtn.setOnClickListener {
             startActivitySafe(
@@ -1182,13 +1178,7 @@ class MainActivity : AppCompatActivity() {
         }
         b.uploadBtn.setOnClickListener { startUpload() }
         b.copyLinkBtn.setOnClickListener { lastLink?.let { copyLink(it) } }
-        b.shareLinkBtn.setOnClickListener {
-            lastLink?.let {
-                startActivitySafe(
-                    Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, it), "Share link")
-                )
-            }
-        }
+        b.shareLinkBtn.setOnClickListener { lastLink?.let { shareText(it) } }
         dlg.setOnDismissListener { if (resultUi === b) resultUi = null }
         refreshResultUi()
         dlg.show()
@@ -1198,7 +1188,7 @@ class MainActivity : AppCompatActivity() {
         val b = resultUi ?: return
         b.uploadBtn.isEnabled = !uploading
         b.uploadBtn.text = when {
-            uploading -> "Uploading..."
+            uploading -> "Uploading…"
             lastLink != null -> "Uploaded to Google Drive"
             else -> "Upload to Google Drive and get link"
         }
@@ -1214,7 +1204,7 @@ class MainActivity : AppCompatActivity() {
         if (uploading || lastVideo == null) return
         uploading = true
         uploadProgress = 0
-        uploadMessage = "Connecting to Google Drive..."
+        uploadMessage = "Connecting to Google Drive…"
         refreshResultUi()
         val request = AuthorizationRequest.builder()
             .setRequestedScopes(listOf(Scope("https://www.googleapis.com/auth/drive.file")))
@@ -1225,8 +1215,7 @@ class MainActivity : AppCompatActivity() {
                 if (result.hasResolution() && pending != null) {
                     authLauncher.launch(IntentSenderRequest.Builder(pending.intentSender).build())
                 } else {
-                    val token = result.accessToken
-                    if (token != null) upload(token) else uploadFinished(null, "Google sign-in failed")
+                    result.accessToken?.let { upload(it) } ?: uploadFinished(null, "Google sign-in failed")
                 }
             }
             .addOnFailureListener { uploadFinished(null, "Google sign-in failed: ${it.message}") }
@@ -1234,12 +1223,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun upload(token: String) {
         val uri = lastVideo ?: return uploadFinished(null, null)
-        uploadMessage = "Uploading..."
+        uploadMessage = "Uploading…"
         refreshResultUi()
         uploadExecutor.execute {
             try {
-                val name = "BackdropCam_${System.currentTimeMillis()}.mp4"
-                val link = DriveUploader(contentResolver, token).uploadAndShare(uri, name) { pct ->
+                val link = DriveUploader(contentResolver, token).uploadAndShare(uri) { pct ->
                     main.post {
                         uploadProgress = pct
                         refreshResultUi()
@@ -1258,59 +1246,46 @@ class MainActivity : AppCompatActivity() {
         if (link != null) {
             lastLink = link
             copyLink(link)
-            if (resultUi == null) {
-                Snackbar.make(ui.root, "Uploaded. Link copied.", Snackbar.LENGTH_LONG)
-                    .setAction("Share") {
-                        startActivitySafe(
-                            Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, link), "Share link")
-                        )
-                    }.show()
-            }
+            if (resultUi == null) hint("Uploaded to Google Drive. Link copied.")
         } else if (message != null && resultUi == null) {
-            toast(message)
+            hint(message)
         }
         refreshResultUi()
     }
 
     private fun copyLink(link: String) {
-        val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
-        cm.setPrimaryClip(ClipData.newPlainText("Video link", link))
-        toast("Link copied")
+        (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("Video link", link))
+        // Android 13+ shows its own "copied" confirmation.
+        if (Build.VERSION.SDK_INT < 33) Toast.makeText(this, "Link copied", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun shareText(text: String) {
+        startActivitySafe(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text), "Share link"))
     }
 
     // ================================================================== hands-free
 
-    private fun setHandsFree(on: Boolean, announce: Boolean) {
-        if (on && !granted(Manifest.permission.RECORD_AUDIO)) {
-            toast("Hands-free needs microphone permission")
-            return
-        }
+    private fun setHandsFree(on: Boolean) {
+        if (on && !granted(Manifest.permission.RECORD_AUDIO)) return hint("Hands-free needs microphone permission")
         settings.handsFree = on
         engine.framingWanted = on
         updateHandsFreeUi()
         coach.reset()
         if (on) {
-            if (!voice.available) toast("Voice commands are still loading; guidance works already")
-            if (announce) {
-                speak("Hands-free on. I will guide you into the frame. Say start to record, and say stop to finish.") {
-                    startListening()
-                }
-            } else startListening()
+            hint("Hands-free on: say “start” to record, “stop” to finish")
+            speak("Hands-free on. I will guide you into the frame. Say start to record, and say stop to finish.")
         } else {
             voice.stop()
-            if (announce) speak("Hands-free off.")
+            hint("Hands-free off")
+            speaker.stop()
         }
     }
 
-    private fun updateHandsFreeUi() {
-        val on = settings.handsFree
-        ui.handsBtn.alpha = if (on) 1f else 0.55f
-        ui.handsBtn.setColorFilter(if (on) 0xFFFFD54F.toInt() else 0xFFFFFFFF.toInt())
-    }
+    private fun updateHandsFreeUi() = setActive(ui.handsBtn, settings.handsFree)
 
     /**
-     * Says [text] out loud. The microphone stops listening while the phone speaks, so it can never
-     * hear its own "say start" and trigger itself; it resumes shortly after.
+     * Says [text] out loud. Keyword listening ignores what is heard while the phone speaks, so it
+     * can never react to its own "say start".
      */
     private fun speak(text: String, done: (() -> Unit)? = null) {
         voice.mutedUntil = Long.MAX_VALUE
@@ -1322,20 +1297,21 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startListening() {
-        if (settings.handsFree && recorder == null && !isFinishing) voice.start()
+        if (settings.handsFree && recorder == null && micMonitor == null && !isFinishing) voice.start()
     }
 
-    /** A keyword was heard: "start"/"action" while idle, "stop"/"cut" while recording or counting down. */
+    /** "start"/"action" while idle; "stop"/"cut" while recording or counting down. */
     private fun onKeyword(word: String, atUs: Long) {
         if (!settings.handsFree) return
         if (word in KeywordSpotter.START_WORDS) {
-            if (recorder == null && countdown == null) onVoiceStart()
+            if (recorder == null && countdown == null) {
+                speak("Okay. Recording in") { if (recorder == null && countdown == null) startCountdown(3) }
+            }
         } else if (word in KeywordSpotter.STOP_WORDS) {
             val rec = recorder
             when {
                 rec != null -> {
-                    // Cut the video just before the word, so "stop" is not in it.
-                    rec.cutoffUs = max(0L, atUs - 250_000L)
+                    rec.cutoffUs = max(0L, atUs - 250_000L) // cut the spoken word off the end
                     stopRecording()
                 }
                 countdown != null -> cancelCountdown()
@@ -1343,25 +1319,19 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun onVoiceStart() {
-        if (recorder != null || countdown != null) return
-        speak("Okay. Recording in") { if (recorder == null && countdown == null) startCountdown(3) }
-    }
-
     // ================================================================== teleprompter
 
     private val teleTick = object : Runnable {
         override fun run() {
+            if (!teleRunning || ui.teleBox.visibility != View.VISIBLE) return
             val now = System.currentTimeMillis()
             val dt = if (teleLastMs == 0L) 0f else (now - teleLastMs) / 1000f
             teleLastMs = now
-            if (teleRunning && ui.teleBox.visibility == View.VISIBLE) {
-                teleAccum += settings.teleSpeed * dp(9) * dt
-                val step = teleAccum.toInt()
-                if (step > 0) {
-                    ui.teleScroll.scrollBy(0, step)
-                    teleAccum -= step
-                }
+            teleAccum += settings.teleSpeed * dp(9) * dt
+            val step = teleAccum.toInt()
+            if (step > 0) {
+                ui.teleScroll.scrollBy(0, step)
+                teleAccum -= step
             }
             main.postDelayed(this, 16)
         }
@@ -1376,6 +1346,7 @@ class MainActivity : AppCompatActivity() {
         if (!show) teleRunning = false
         if (script != null) ui.teleText.text = script.body
         ui.teleText.textSize = settings.teleSize.toFloat()
+        setActive(ui.teleBtn, show)
     }
 
     private fun showScriptsSheet() {
@@ -1390,9 +1361,7 @@ class MainActivity : AppCompatActivity() {
         b.sizeSlider.addOnChangeListener { _, v, _ -> settings.teleSize = v.toInt(); updateTeleUi() }
         b.newScriptBtn.setOnClickListener { editScript(null, "", "") }
         b.importScriptBtn.setOnClickListener {
-            importScript.launch(
-                arrayOf("text/plain", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-            )
+            importScript.launch(arrayOf("text/plain", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"))
         }
         val refresh = {
             b.scriptList.removeAllViews()
@@ -1400,7 +1369,7 @@ class MainActivity : AppCompatActivity() {
             if (list.isEmpty()) {
                 b.scriptList.addView(TextView(this).apply {
                     text = "No scripts yet. Tap New script or Import."
-                    setTextColor(0xB3FFFFFF.toInt())
+                    setTextColor(ContextCompat.getColor(context, R.color.text_secondary))
                     setPadding(0, dp(8), 0, dp(8))
                 })
             }
@@ -1409,7 +1378,7 @@ class MainActivity : AppCompatActivity() {
                 b.scriptList.addView(TextView(this).apply {
                     text = (if (active) "✓  " else "") + sc.title
                     textSize = 16f
-                    setTextColor(if (active) 0xFFFFD54F.toInt() else 0xFFFFFFFF.toInt())
+                    setTextColor(if (active) ContextCompat.getColor(context, R.color.accent) else 0xFFFFFFFF.toInt())
                     setPadding(0, dp(12), 0, dp(12))
                     setOnClickListener {
                         settings.teleScript = sc.id
@@ -1451,23 +1420,17 @@ class MainActivity : AppCompatActivity() {
             .setTitle(if (id == null) "New script" else "Edit script")
             .setView(b.root)
             .setPositiveButton("Save") { _, _ ->
-                val newId = scripts.save(id, b.scriptTitle.text.toString(), b.scriptBody.text.toString())
-                settings.teleScript = newId
+                settings.teleScript = scripts.save(id, b.scriptTitle.text.toString(), b.scriptBody.text.toString())
                 settings.teleOn = true
                 updateTeleUi()
                 refreshScriptList?.invoke()
-                if (!settings.frontCamera) toast("Script saved. Switch to the front camera to use the teleprompter.")
+                if (!settings.frontCamera) hint("Script saved. Switch to the front camera to use it.")
             }
             .setNegativeButton("Cancel", null)
             .show()
     }
 
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        handleShareIntent(intent)
-    }
-
-    /** Text shared from Google Docs, Notes, WhatsApp... becomes a new teleprompter script. */
+    /** Text shared from Google Docs, Notes, WhatsApp… becomes a new teleprompter script. */
     private fun handleShareIntent(intent: Intent?) {
         if (intent?.action != Intent.ACTION_SEND) return
         val text = intent.getStringExtra(Intent.EXTRA_TEXT) ?: return
@@ -1478,18 +1441,28 @@ class MainActivity : AppCompatActivity() {
 
     // ================================================================== helpers
 
-    private fun meanColor(bmp: Bitmap): FloatArray {
-        val small = Bitmap.createScaledBitmap(bmp, 32, 32, true)
-        val px = IntArray(32 * 32)
-        small.getPixels(px, 0, 32, 0, 0, 32, 32)
-        if (small !== bmp) small.recycle()
-        var r = 0f; var g = 0f; var b = 0f
-        for (c in px) {
-            r += ((c shr 16) and 0xFF) / 255f
-            g += ((c shr 8) and 0xFF) / 255f
-            b += (c and 0xFF) / 255f
-        }
-        return floatArrayOf(r / px.size, g / px.size, b / px.size)
+    /** A short message over the camera picture (replaces system toasts). */
+    private fun hint(message: String) {
+        val v = ui.hintText
+        v.text = message
+        v.visibility = View.VISIBLE
+        v.animate().cancel()
+        v.animate().setStartDelay(0).alpha(1f).setDuration(150).start()
+        main.removeCallbacks(hideHint)
+        main.postDelayed(hideHint, 2000L + message.length * 30L)
+    }
+
+    private val hideHint = Runnable {
+        ui.hintText.animate().setStartDelay(0).alpha(0f).setDuration(250)
+            .withEndAction { ui.hintText.visibility = View.GONE }.start()
+    }
+
+    /** Accent tint for a button whose feature is switched on. */
+    private fun setActive(button: ImageView, on: Boolean) {
+        ImageViewCompat.setImageTintList(
+            button,
+            ColorStateList.valueOf(if (on) ContextCompat.getColor(this, R.color.accent) else 0xFFFFFFFF.toInt())
+        )
     }
 
     /** Keeps icons upright when the phone is turned, like the built-in camera app. */
@@ -1501,42 +1474,58 @@ class MainActivity : AppCompatActivity() {
             else -> 0f
         }
         val views = mutableListOf<View>(
-            ui.settingsBtn, ui.flashBtn, ui.timerBox, ui.handsBtn, ui.aspectChip, ui.qualityChip, ui.micBtn, ui.pauseBtn, ui.tuneBtn, ui.teleBtn,
-            ui.flipBtn, ui.lastThumb, ui.countdownText, ui.recPill
+            ui.settingsBtn, ui.flashBtn, ui.aspectChip, ui.qualityChip, ui.timerChip,
+            ui.micBtn, ui.handsBtn, ui.tuneBtn, ui.teleBtn,
+            ui.pauseBtn, ui.lastThumb, ui.countdownText, ui.recPill
         )
         for (i in 0 until ui.zoomRow.childCount) views += ui.zoomRow.getChildAt(i)
         for (i in 0 until ui.backdropStrip.childCount) views += ui.backdropStrip.getChildAt(i)
         for (v in views) v.animate().rotation(angle).setDuration(200).start()
     }
 
-    private fun loadThumbInto(uri: Uri, target: ImageView) {
+    private fun loadThumbInto(uri: Uri, target: ImageView, forgetIfMissing: Boolean = false) {
         io.execute {
             val bmp: Bitmap? = try {
-                val r = MediaMetadataRetriever()
-                r.setDataSource(this, uri)
-                val f = r.getFrameAtTime(0)
-                r.release()
-                f
+                MediaMetadataRetriever().run {
+                    setDataSource(this@MainActivity, uri)
+                    getFrameAtTime(0).also { release() }
+                }
             } catch (e: Exception) {
                 null
             }
-            main.post { if (bmp != null) target.setImageBitmap(bmp) }
+            main.post {
+                when {
+                    bmp != null -> target.setImageBitmap(bmp)
+                    forgetIfMissing -> { // the video was deleted from the gallery
+                        lastVideo = null
+                        settings.lastVideo = null
+                        target.setImageDrawable(null)
+                    }
+                }
+            }
         }
+    }
+
+    private fun View.roundCorners(radiusPx: Int) {
+        outlineProvider = object : ViewOutlineProvider() {
+            override fun getOutline(view: View, outline: Outline) {
+                outline.setRoundRect(0, 0, view.width, view.height, radiusPx.toFloat())
+            }
+        }
+        clipToOutline = true
     }
 
     private fun startActivitySafe(intent: Intent) {
         try {
             startActivity(intent)
         } catch (e: Exception) {
-            toast("No app found for this")
+            hint("No app found for this")
         }
     }
 
     private fun granted(p: String) = ContextCompat.checkSelfPermission(this, p) == PackageManager.PERMISSION_GRANTED
 
     private fun dp(v: Int) = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), resources.displayMetrics).toInt()
-
-    private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
 
     companion object {
         private const val KEY_NONE = "none"

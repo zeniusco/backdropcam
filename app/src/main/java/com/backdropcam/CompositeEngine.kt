@@ -141,12 +141,9 @@ class CompositeEngine(context: Context) {
     class Framing(
         val coverage: Float,
         val centerX: Float,
-        val left: Float,
-        val right: Float,
         val top: Float,
         val bottom: Float,
         val mirrored: Boolean,
-        val landscape: Boolean,
         /** Average colour of the person (0..1), for brightness matching. */
         val meanR: Float = 0f,
         val meanG: Float = 0f,
@@ -453,13 +450,12 @@ class CompositeEngine(context: Context) {
             val gen = maskGen
             val frame = bmp
             val mirroredView = isFront && mirrorFront
-            val landscape = deviceRotation % 180 != 0
             segExecutor.execute {
                 try {
                     val result = segmenter?.segment(frame)
                     if (result != null) {
                         handler.post { if (gen == maskGen) uploadMask(result) }
-                        reportFraming(result, frame, mirroredView, landscape)
+                        reportFraming(result, frame, mirroredView)
                     }
                 } catch (t: Throwable) {
                     Log.e(TAG, "segmentation failed", t)
@@ -472,7 +468,7 @@ class CompositeEngine(context: Context) {
     }
 
     /** Runs on the segmentation thread. */
-    private fun reportFraming(mask: PersonSegmenter.Mask, frame: Bitmap, mirrored: Boolean, landscape: Boolean) {
+    private fun reportFraming(mask: PersonSegmenter.Mask, frame: Bitmap, mirrored: Boolean) {
         val cb = onFraming ?: return
         val now = System.currentTimeMillis()
         if (now - lastFramingMs < 150) return
@@ -485,7 +481,7 @@ class CompositeEngine(context: Context) {
         var sr = 0L; var sg = 0L; var sb = 0L
         var count = 0
         var sumX = 0L
-        var minX = w; var maxX = -1; var minY = h; var maxY = -1
+        var minY = h; var maxY = -1
         var y = 0
         while (y < h) {
             var x = 0
@@ -498,8 +494,6 @@ class CompositeEngine(context: Context) {
                         val c = pixels[row + x]
                         sr += (c shr 16) and 0xFF; sg += (c shr 8) and 0xFF; sb += c and 0xFF
                     }
-                    if (x < minX) minX = x
-                    if (x > maxX) maxX = x
                     if (y < minY) minY = y
                     if (y > maxY) maxY = y
                 }
@@ -509,12 +503,12 @@ class CompositeEngine(context: Context) {
         }
         val total = ((w + 1) / 2) * ((h + 1) / 2)
         val f = if (count == 0) {
-            Framing(0f, 0.5f, 0f, 0f, 0f, 0f, mirrored, landscape)
+            Framing(0f, 0.5f, 0f, 0f, mirrored)
         } else {
             Framing(
                 count.toFloat() / total, sumX.toFloat() / count / w,
-                minX.toFloat() / w, maxX.toFloat() / w, minY.toFloat() / h, maxY.toFloat() / h,
-                mirrored, landscape,
+                minY.toFloat() / h, maxY.toFloat() / h,
+                mirrored,
                 sr / (255f * count), sg / (255f * count), sb / (255f * count)
             )
         }

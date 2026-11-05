@@ -69,7 +69,7 @@ class VideoRecorder(
     /** Recording clock in ns: stops while paused, so the video has no gap. */
     fun ptsNs(): Long = (if (paused) pausedAtNs else System.nanoTime()) - startNs - pauseOffsetNs
 
-    /** Samples after this time (us) are dropped, e.g. to cut the claps used to stop recording. */
+    /** Samples after this time (us) are dropped, e.g. to cut the spoken "stop" from the end. */
     @Volatile var cutoffUs = Long.MAX_VALUE
 
     private val appContext = context.applicationContext
@@ -352,13 +352,18 @@ class VideoRecorder(
         private const val AUDIO = 1
         const val SAMPLE_RATE = 48000
 
-        private fun avcCaps(): MediaCodecInfo.VideoCapabilities? = try {
-            MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
-                .firstOrNull { it.isEncoder && it.supportedTypes.any { t -> t.equals(MediaFormat.MIMETYPE_VIDEO_AVC, true) } }
-                ?.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC)?.videoCapabilities
-        } catch (e: Exception) {
-            null
+        /** The H.264 encoder's limits, looked up once (enumerating codecs is slow). */
+        private val avcCapsCache: MediaCodecInfo.VideoCapabilities? by lazy {
+            try {
+                MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
+                    .firstOrNull { it.isEncoder && it.supportedTypes.any { t -> t.equals(MediaFormat.MIMETYPE_VIDEO_AVC, true) } }
+                    ?.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC)?.videoCapabilities
+            } catch (e: Exception) {
+                null
+            }
         }
+
+        private fun avcCaps() = avcCapsCache
 
         /** True if the encoder can produce this size in either orientation. */
         fun isSizeSupported(w: Int, h: Int): Boolean {

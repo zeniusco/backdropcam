@@ -8,42 +8,17 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:padding="24dp">
+        android:paddingStart="24dp"
+        android:paddingTop="8dp"
+        android:paddingEnd="24dp"
+        android:paddingBottom="32dp">
 
         <TextView style="@style/SheetTitle" android:text="Settings" />
 
-        <TextView style="@style/SheetLabel" android:text="Video quality" />
+        <!-- Recording -->
+        <TextView style="@style/SheetSection" android:text="Recording" />
 
-        <com.google.android.material.chip.ChipGroup
-            android:id="@+id/qualityGroup"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            app:selectionRequired="true"
-            app:singleSelection="true">
-
-            <com.google.android.material.chip.Chip
-                android:id="@+id/qMax"
-                style="@style/Widget.Material3.Chip.Filter"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Highest (up to 4K)" />
-
-            <com.google.android.material.chip.Chip
-                android:id="@+id/q1080"
-                style="@style/Widget.Material3.Chip.Filter"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="1080p" />
-
-            <com.google.android.material.chip.Chip
-                android:id="@+id/q720"
-                style="@style/Widget.Material3.Chip.Filter"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="720p" />
-        </com.google.android.material.chip.ChipGroup>
-
-        <TextView style="@style/SheetLabel" android:text="Auto-stop recording after" />
+        <TextView style="@style/SheetLabel" android:text="Stop automatically after" />
 
         <com.google.android.material.chip.ChipGroup
             android:id="@+id/autoStopGroup"
@@ -61,12 +36,21 @@
             <com.google.android.material.chip.Chip android:id="@+id/as180" style="@style/Widget.Material3.Chip.Filter" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="180s" />
         </com.google.android.material.chip.ChipGroup>
 
-        <TextView style="@style/SheetLabel" android:text="Cut-out quality" />
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/mirrorSwitch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Mirror the front camera" />
+
+        <!-- Cut-out -->
+        <TextView style="@style/SheetSection" android:text="Cut-out" />
 
         <com.google.android.material.chip.ChipGroup
             android:id="@+id/modelGroup"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
             app:selectionRequired="true"
             app:singleSelection="true">
 
@@ -75,7 +59,7 @@
                 style="@style/Widget.Material3.Chip.Filter"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Best (recommended)" />
+                android:text="Best edges" />
 
             <com.google.android.material.chip.Chip
                 android:id="@+id/mFast"
@@ -94,36 +78,22 @@
             android:valueFrom="0"
             android:valueTo="1" />
 
-        <com.google.android.material.materialswitch.MaterialSwitch
-            android:id="@+id/mirrorSwitch"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:text="Mirror front camera (like a mirror)" />
-
-        <com.google.android.material.materialswitch.MaterialSwitch
-            android:id="@+id/wideSwitch"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:text="Use the ultra-wide 0.6x lens (zoomed out) when available" />
-
-        <com.google.android.material.materialswitch.MaterialSwitch
-            android:id="@+id/handsFreeSwitch"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:text="Hands-free: voice guide, say &quot;start&quot;, clap twice to stop" />
+        <!-- Sharing -->
+        <TextView style="@style/SheetSection" android:text="Sharing" />
 
         <com.google.android.material.materialswitch.MaterialSwitch
             android:id="@+id/autoUploadSwitch"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="4dp"
-            android:text="Auto-upload to Google Drive after recording" />
+            android:text="Upload to Google Drive after each recording" />
+
+        <!-- Tips -->
+        <TextView style="@style/SheetSection" android:text="Tips" />
 
         <TextView
             style="@style/SheetLabel"
-            android:text="Tip: the phone's volume buttons, or a Bluetooth selfie remote, start and stop recording. Useful when the phone is on a tripod." />
+            android:lineSpacingMultiplier="1.25"
+            android:text="• Volume buttons or a Bluetooth selfie remote start and stop recording.\n• Hands-free (side toolbar): say “start” to record and “stop” to finish.\n• Share text from Docs, Notes or WhatsApp to BackdropCam to make a teleprompter script." />
     </LinearLayout>
 </androidx.core.widget.NestedScrollView>

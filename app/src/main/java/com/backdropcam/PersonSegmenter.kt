@@ -32,8 +32,6 @@ class PersonSegmenter(context: Context, highQuality: Boolean) {
     private var prev: FloatArray? = null
     private var lastTs = 0L
 
-    /** Temporal smoothing: higher is steadier, lower reacts faster. */
-    @Volatile var smoothing = 0.3f
 
     @Volatile private var resetRequested = false
 
@@ -94,7 +92,7 @@ class PersonSegmenter(context: Context, highQuality: Boolean) {
 
         val p = prev?.takeIf { it.size == n }
         val out = ByteArray(n)
-        val a = smoothing
+        val a = SMOOTHING
         for (i in 0 until n) {
             var v = if (invert) 1f - cur[i] else cur[i]
             if (p != null) v = a * p[i] + (1f - a) * v
@@ -111,6 +109,8 @@ class PersonSegmenter(context: Context, highQuality: Boolean) {
 
     companion object {
         private const val TAG = "PersonSegmenter"
+        /** Temporal smoothing of the mask: higher is steadier, lower follows movement faster. */
+        private const val SMOOTHING = 0.3f
         const val MODEL_HQ = "selfie_multiclass_256x256.tflite"
         const val MODEL_FAST = "selfie_segmenter.tflite"
     }
