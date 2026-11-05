@@ -114,10 +114,43 @@ class AppSettings(context: Context) {
         get() = p.getString("teleScript", null)
         set(v) = p.edit().putString("teleScript", v).apply()
 
+    /** Logo overlay switched on (needs a logo image saved in the app). */
+    var logoOn: Boolean
+        get() = p.getBoolean("logoOn", true)
+        set(v) = p.edit().putBoolean("logoOn", v).apply()
+
+    /** Logo position per backdrop ("none", "blur" or a backdrop file), so each can differ. */
+    fun logoPlacement(backdrop: String): LogoPlacement =
+        p.getString("logo_$backdrop", null)?.let(LogoPlacement::parse) ?: LogoPlacement()
+
+    fun setLogoPlacement(backdrop: String, v: LogoPlacement) = p.edit().putString("logo_$backdrop", v.toString()).apply()
+
     val qualityCap: Int
         get() = when (quality) {
             "1080" -> 1920
             "720" -> 1280
             else -> 3840
         }
+}
+
+/**
+ * Where the logo sits, in the visible picture: centre (0..1, y up), width as a fraction of the
+ * picture width, rotation in degrees (counter-clockwise), opacity 0..1, and behind the person.
+ */
+data class LogoPlacement(
+    val x: Float = 0.80f,
+    val y: Float = 0.88f,
+    val size: Float = 0.28f,
+    val rotation: Float = 0f,
+    val opacity: Float = 1f,
+    val behind: Boolean = false,
+) {
+    override fun toString() = "$x,$y,$size,$rotation,$opacity,$behind"
+
+    companion object {
+        fun parse(s: String): LogoPlacement? = runCatching {
+            val p = s.split(",")
+            LogoPlacement(p[0].toFloat(), p[1].toFloat(), p[2].toFloat(), p[3].toFloat(), p[4].toFloat(), p[5].toBoolean())
+        }.getOrNull()
+    }
 }

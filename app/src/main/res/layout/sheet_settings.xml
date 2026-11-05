@@ -94,6 +94,6 @@
         <TextView
             style="@style/SheetLabel"
             android:lineSpacingMultiplier="1.25"
-            android:text="• Volume buttons or a Bluetooth selfie remote start and stop recording.\n• Hands-free (side toolbar): say “start” to record and “stop” to finish.\n• Share text from Docs, Notes or WhatsApp to BackdropCam to make a teleprompter script." />
+            android:text="• Volume buttons or a Bluetooth selfie remote start and stop recording.\n• Hands-free (side toolbar): say “start” to record and “stop” to finish.\n• Share text from Docs, Notes or WhatsApp to BackdropCam to make a teleprompter script.\n• Logo (side toolbar): add your logo, then drag, pinch and twist it into place. Each backdrop remembers its own logo position." />
     </LinearLayout>
 </androidx.core.widget.NestedScrollView>
