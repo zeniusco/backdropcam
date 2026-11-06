@@ -50,7 +50,11 @@ class VideoRecorder(
     private val musicVolume: () -> Float = { 0f },
     private val musicDuck: () -> Boolean = { true },
     private val fps: Int = 30,
+    /** Use H.265/HEVC (about half the file size) when the phone can encode this size with it. */
+    preferHevc: Boolean = true,
 ) {
+    /** "video/hevc" or "video/avc", whichever is used for this recording. */
+    val videoMime: String = if (preferHevc && hevcSupports(width, height)) MediaFormat.MIMETYPE_VIDEO_HEVC else MediaFormat.MIMETYPE_VIDEO_AVC
     @Volatile var paused = false
         private set
     @Volatile private var pausedAtNs = 0L
@@ -129,16 +133,22 @@ class VideoRecorder(
         val audioOk = withAudio && setupAudio()
         sink = MuxSink(muxer, if (audioOk) 2 else 1)
 
-        val bitrate = (width.toLong() * height * fps * 0.14).toLong().coerceIn(4_000_000L, 80_000_000L).toInt()
-        val vf = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
+        // Bits per pixel per frame: HEVC needs about 40 % less than H.264 for the same quality.
+        // 4K at 30 fps comes to ~12 Mbit/s (HEVC) or ~19 Mbit/s (H.264); 1080p to ~3 / ~5.
+        val hevc = videoMime == MediaFormat.MIMETYPE_VIDEO_HEVC
+        val bpp = if (hevc) 0.055 else 0.09
+        val bitrate = (width.toLong() * height * fps * bpp).toLong().coerceIn(2_000_000L, 40_000_000L).toInt()
+        val vf = MediaFormat.createVideoFormat(videoMime, width, height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
-            setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileHigh)
-            setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel51)
+            if (!hevc) {
+                setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileHigh)
+                setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel51)
+            }
         }
-        videoCodec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+        videoCodec = MediaCodec.createEncoderByType(videoMime)
         try {
             videoCodec.configure(vf, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         } catch (e: Exception) {
@@ -389,6 +399,18 @@ class VideoRecorder(
         }
 
         private fun avcCaps() = avcCapsCache
+
+        private val hevcCaps: MediaCodecInfo.VideoCapabilities? by lazy {
+            try {
+                MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
+                    .firstOrNull { it.isEncoder && it.supportedTypes.any { t -> t.equals(MediaFormat.MIMETYPE_VIDEO_HEVC, true) } }
+                    ?.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_HEVC)?.videoCapabilities
+            } catch (e: Exception) {
+                null
+            }
+        }
+
+        fun hevcSupports(w: Int, h: Int) = hevcCaps?.isSizeSupported(w, h) == true
 
         /** True if the encoder can produce this size in either orientation. */
         fun isSizeSupported(w: Int, h: Int): Boolean {

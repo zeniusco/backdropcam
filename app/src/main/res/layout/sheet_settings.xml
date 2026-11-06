@@ -37,6 +37,13 @@
         </com.google.android.material.chip.ChipGroup>
 
         <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/smallFilesSwitch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Smaller files (H.265). Turn off only if an old player cannot open your videos" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
             android:id="@+id/mirrorSwitch"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

@@ -125,6 +125,11 @@ class AppSettings(context: Context) {
 
     fun setLogoPlacement(backdrop: String, v: LogoPlacement) = p.edit().putString("logo_$backdrop", v.toString()).apply()
 
+    /** H.265/HEVC for about half the file size; off = H.264 for very old players. */
+    var smallFiles: Boolean
+        get() = p.getBoolean("smallFiles", true)
+        set(v) = p.edit().putBoolean("smallFiles", v).apply()
+
     // ---------------------------------------------------------------- captions
 
     /** Live captions drawn into the video. */

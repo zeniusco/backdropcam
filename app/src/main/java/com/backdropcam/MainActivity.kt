@@ -1145,6 +1145,7 @@ class MainActivity : AppCompatActivity() {
                 music = if (audio && settings.musicOn && musicFile.exists()) MusicSource(musicFile) else null,
                 musicVolume = { settings.musicVolume },
                 musicDuck = { settings.musicDuck },
+                preferHevc = settings.smallFiles,
             )
             rec.start()
             engine.startRecording(rec.inputSurface, size.width, size.height, rotation, { rec.ptsNs() }, { rec.paused })
@@ -1379,6 +1380,8 @@ class MainActivity : AppCompatActivity() {
             settings.autoStop = stopIds.entries.firstOrNull { it.value == ids.firstOrNull() }?.key ?: 0
         }
 
+        b.smallFilesSwitch.isChecked = settings.smallFiles
+        b.smallFilesSwitch.setOnCheckedChangeListener { _, on -> settings.smallFiles = on }
         b.mirrorSwitch.isChecked = settings.mirrorFront
         b.mirrorSwitch.setOnCheckedChangeListener { _, on ->
             settings.mirrorFront = on
