@@ -785,7 +785,10 @@ class CompositeEngine(context: Context) {
     private fun submitSegmentation(slot: Slot): Boolean {
         val (ww, wh) = worldSize()
         val full = fullRoi(ww, wh)
-        val crop = nextRoi
+        // Always the whole picture. A close-up crop gave more detail, but when the model missed
+        // part of you for a moment (a light shirt against a bright window), the crop shrank and
+        // everything outside it was cut away with straight edges. The whole picture never can.
+        val crop: FloatArray? = null
         val isCrop = crop != null
         val roi = crop ?: full
         val changed = if (isCrop) lastRoi?.contentEquals(roi) != true else lastFullRoi?.contentEquals(roi) != true
