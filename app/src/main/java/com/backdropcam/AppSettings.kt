@@ -70,7 +70,7 @@ class AppSettings(context: Context) {
 
     /** "full" (fill the tall screen), "169" (9:16 / 16:9), "11" (square) or "43" (widest view). */
     var viewMode: String
-        get() = p.getString("viewMode", "169")!!
+        get() = p.getString("viewMode", "full")!!
         set(v) = p.edit().putString("viewMode", v).apply()
 
     val fullScreen: Boolean get() = viewMode == "full"

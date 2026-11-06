@@ -21,6 +21,10 @@ import android.os.Bundle
 import android.os.CountDownTimer
 import android.os.Handler
 import android.os.Looper
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.os.PowerManager
 import android.os.StatFs
 import android.provider.MediaStore
@@ -348,6 +352,9 @@ class MainActivity : AppCompatActivity() {
         foreground = true
         engine.setBackdropVideoPlaying(true)
         if (orientationListener.canDetectOrientation()) orientationListener.enable()
+        (getSystemService(SENSOR_SERVICE) as? SensorManager)?.let { sm ->
+            sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)?.let { sm.registerListener(tiltListener, it, SensorManager.SENSOR_DELAY_UI) }
+        }
         startListening()
     }
 
@@ -356,6 +363,7 @@ class MainActivity : AppCompatActivity() {
         foreground = false
         engine.setBackdropVideoPlaying(false)
         orientationListener.disable()
+        (getSystemService(SENSOR_SERVICE) as? SensorManager)?.unregisterListener(tiltListener)
         cancelCountdown(announce = false)
         if (recorder != null) stopRecording()
         micMonitor?.stop()
@@ -451,10 +459,27 @@ class MainActivity : AppCompatActivity() {
         ui.lastThumb.roundCorners(dp(14))
     }
 
+    // How far the phone leans back: 0 = standing upright, 1 = lying flat. Measured from gravity.
+    @Volatile private var flatness = 0f
+    private var pendingRotation = -1
+    private var pendingSinceMs = 0L
+
+    private val tiltListener = object : SensorEventListener {
+        override fun onSensorChanged(e: SensorEvent) {
+            val (x, y, z) = Triple(e.values[0], e.values[1], e.values[2])
+            val g = kotlin.math.sqrt(x * x + y * y + z * z).coerceAtLeast(0.1f)
+            flatness = kotlin.math.abs(z) / g
+        }
+        override fun onAccuracyChanged(s: Sensor?, a: Int) {}
+    }
+
     private val orientationListener by lazy {
         object : OrientationEventListener(this) {
             override fun onOrientationChanged(o: Int) {
                 if (o == ORIENTATION_UNKNOWN) return
+                // Lying flat or leaning far back (on a table, held low): the reading is unreliable,
+                // so keep the current orientation instead of flipping the picture sideways.
+                if (flatness > 0.75f) return
                 val target = when {
                     o in 60..120 -> 90
                     o in 150..210 -> 180
@@ -462,6 +487,14 @@ class MainActivity : AppCompatActivity() {
                     o <= 30 || o >= 330 -> 0
                     else -> return // dead zone avoids flicker between orientations
                 }
+                // Only turn once the new way of holding the phone has lasted half a second.
+                val now = System.currentTimeMillis()
+                if (target != pendingRotation) {
+                    pendingRotation = target
+                    pendingSinceMs = now
+                    return
+                }
+                if (now - pendingSinceMs < 500) return
                 if (target != deviceRotation && recorder == null) {
                     deviceRotation = target
                     engine.setDeviceRotation(target)
@@ -653,23 +686,24 @@ class MainActivity : AppCompatActivity() {
         else -> "FULL"
     }
 
-    /** Picture shape presets for where the video will be posted. */
+    /** Tap to step through the picture shapes (no menu): FULL, 16:9, 4:3, 1:1. */
     private fun cycleViewMode() {
         if (busy()) return
-        val modes = listOf("169", "full", "11", "43")
-        val labels = arrayOf(
-            "9:16  Reels, Shorts, TikTok, Status (turn the phone sideways for YouTube 16:9)",
-            "FULL  Fills your screen edge to edge (the video gets your screen's shape, so other apps may add thin bars)",
-            "1:1  Square, for Instagram and LinkedIn feeds",
-            "4:3  The widest view this lens can see",
-        )
-        MaterialAlertDialogBuilder(this)
-            .setTitle("Video format")
-            .setSingleChoiceItems(labels, modes.indexOf(settings.viewMode).coerceAtLeast(0)) { d, which ->
-                d.dismiss()
-                setViewMode(modes[which])
+        val next = when (settings.viewMode) {
+            "full" -> "169"
+            "169" -> "43"
+            "43" -> "11"
+            else -> "full"
+        }
+        setViewMode(next)
+        hint(
+            when (next) {
+                "169" -> "16:9, the standard video shape"
+                "43" -> "4:3, the widest view this lens can see"
+                "11" -> "1:1, square for Instagram and LinkedIn"
+                else -> "Full screen, the video matches your screen"
             }
-            .show()
+        )
     }
 
     private fun setViewMode(mode: String) {
