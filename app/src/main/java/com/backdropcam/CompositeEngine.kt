@@ -108,6 +108,8 @@ class CompositeEngine(context: Context) {
         var capturedMs = 0L
         var encode = false
         var ptsNs = 0L
+        /** Sent to the model (false = waits for the cut-out of the next frame that is). */
+        var submitted = false
     }
 
     /**
@@ -692,9 +694,11 @@ class CompositeEngine(context: Context) {
         ensureSmallTarget()
         if (ring.isEmpty()) return
 
-        // 1. Copy the frame into a free place in the ring. Frames still waiting for their own
-        //    cut-out are never overwritten; if all are waiting, this camera frame is skipped.
-        val slot = ring.firstOrNull { !it.pending } ?: return
+        // 1. Copy the frame into a free place in the ring. If every place is taken, the oldest
+        //    waiting frame is shown now (with the newest cut-out), so no frame is ever dropped.
+        val slot = ring.firstOrNull { !it.pending }
+            ?: ring.filter { it.pending && !it.submitted }.minByOrNull { it.id }?.also { presentPendingUpTo(it.id) }
+            ?: return
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, slot.fbo)
         GLES30.glViewport(0, 0, ringW, ringH)
         GLES30.glUseProgram(copyProgram)
@@ -726,7 +730,9 @@ class CompositeEngine(context: Context) {
         //    the cut-out never lags behind your movement. Two frames are worked on at once (one
         //    in the model, the next one already prepared), so the model never waits; only a
         //    frame arriving while both places are taken is left out.
-        if (inFlight.get() >= 2 || !submitSegmentation(slot)) skip(slot)
+        slot.submitted = inFlight.get() < 2 && submitSegmentation(slot)
+        // Not sent: it is shown with the cut-out of the next frame that is (1/30 s later), so the
+        // video keeps every frame and the cut-out is never more than a frame away.
         // Safety net: a model that hangs must not freeze the picture.
         ring.filter { it.pending && now - it.capturedMs > MAX_WAIT_MS }.forEach { present(it) }
     }
@@ -844,10 +850,15 @@ class CompositeEngine(context: Context) {
                                 fullStale = false
                             }
                         }
-                        // Show and record this frame with its own cut-out.
-                        if (slot.pending && slot.id == id) present(slot)
+                        // Show and record this frame with its own cut-out (and any frame just
+                        // before it that could not be sent, with this very close one).
+                        presentPendingUpTo(id)
                         bitmapPool.offer(bmp)
                         inFlight.decrementAndGet()
+                        // The newest frame still waiting goes to the model straight away.
+                        ring.filter { it.pending && !it.submitted }.maxByOrNull { it.id }?.let { w ->
+                            if (inFlight.get() < 2) w.submitted = submitSegmentation(w)
+                        }
                         noteGlBusy(SystemClock.uptimeMillis() - t1)
                     }
                 }
@@ -1003,6 +1014,14 @@ class CompositeEngine(context: Context) {
     }
 
     // ================================================================== showing / recording frames
+
+    /** Shows (and records) every waiting frame up to [id], oldest first. */
+    private fun presentPendingUpTo(id: Long) {
+        while (true) {
+            val next = ring.filter { it.pending && it.id <= id }.minByOrNull { it.id } ?: return
+            present(next)
+        }
+    }
 
     private fun present(slot: Slot) {
         slot.pending = false

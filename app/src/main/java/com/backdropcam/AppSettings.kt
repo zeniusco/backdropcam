@@ -22,9 +22,13 @@ class AppSettings(context: Context) {
         get() = p.getString("quality", if (lowEndPhone) "1080" else "max")!!
         set(v) = p.edit().putString("quality", v).apply()
 
+    /**
+     * "Best edges" model. Off by default: the fast model keeps up with every frame on every phone,
+     * so the cut-out stays exactly on you without slowing the video down.
+     */
     var highQualityCutout: Boolean
-        get() = p.getBoolean("hq", !lowEndPhone)
-        set(v) = p.edit().putBoolean("hq", v).apply()
+        get() = p.getBoolean("hq2", false)
+        set(v) = p.edit().putBoolean("hq2", v).apply()
 
     var softness: Float
         get() = p.getFloat("softness", 0.3f)
@@ -96,7 +100,7 @@ class AppSettings(context: Context) {
         p.edit()
             .putBoolean("safeMode", true)
             .putString("quality", "720")
-            .putBoolean("hq", false)
+            .putBoolean("hq2", false)
             .putBoolean("sessionOpen", false)
             .commit()
     }

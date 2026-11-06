@@ -32,12 +32,6 @@ class PersonSegmenter(context: Context, highQuality: Boolean, allowGpu: Boolean 
     private var segmenter: ImageSegmenter = create()
     private var lastTs = 0L
 
-    /**
-     * Smoothing memory, kept separately for each picture region ("stream"): the whole picture and
-     * the close-up crop around the person must never be blended with each other.
-     */
-    private class History(var mask: FloatArray? = null, var luma: FloatArray? = null)
-    private val history = arrayOf(History(), History())
 
 
     @Volatile private var resetRequested = false
@@ -73,15 +67,7 @@ class PersonSegmenter(context: Context, highQuality: Boolean, allowGpu: Boolean 
      * around the person moved), so the previous mask is not blended in at the wrong place.
      */
     fun segment(bitmap: Bitmap, resetSmoothing: Boolean = false, stream: Int = 0): Mask? {
-        if (resetRequested) {
-            history.forEach { it.mask = null; it.luma = null }
-            resetRequested = false
-        }
-        val h = history[stream.coerceIn(0, history.size - 1)]
-        if (resetSmoothing) {
-            h.mask = null
-            h.luma = null
-        }
+        resetRequested = false
         val ts = max(lastTs + 1, SystemClock.uptimeMillis())
         lastTs = ts
         val result = try {
@@ -106,61 +92,15 @@ class PersonSegmenter(context: Context, highQuality: Boolean, allowGpu: Boolean 
         val cur = FloatArray(n)
         ByteBufferExtractor.extract(m).asFloatBuffer().get(cur, 0, n)
 
-        // Brightness of the picture at each mask point, to tell real movement from model noise.
-        val luma = lumaAt(bitmap, m.width, m.height)
-        val p = h.mask?.takeIf { it.size == n }
-        val pl = h.luma?.takeIf { it.size == n }
+        // Smoothing over time is done on the graphics chip (it sees every frame); here the mask
+        // is only converted, which keeps this step fast.
         val out = ByteArray(n)
         for (i in 0 until n) {
-            var v = if (invert) 1f - cur[i] else cur[i]
-            if (p != null && pl != null) {
-                // Where the picture itself did not change, a changing mask is only model noise
-                // (the flicker around your outline): hold it steady. Where the picture changed,
-                // you moved: follow the new mask at once, so nothing trails behind you.
-                val moved = abs(luma[i] - pl[i])
-                var a = SMOOTHING * (1f - ((moved - 0.04f) / 0.12f).coerceIn(0f, 1f))
-                // A big jump in the mask is real (a hand moved in or out): never hold it back.
-                a *= 1f - ((abs(v - p[i]) - 0.2f) / 0.2f).coerceIn(0f, 1f)
-                v = a * p[i] + (1f - a) * v
-            }
-            cur[i] = v
+            val v = if (invert) 1f - cur[i] else cur[i]
             out[i] = (v.coerceIn(0f, 1f) * 255f).toInt().toByte()
         }
-        h.mask = cur
-        h.luma = luma
         return Mask(out, m.width, m.height)
     }
-
-    private var pixels = IntArray(0)
-
-    private var plane = FloatArray(0)
-
-    /**
-     * Brightness (0..1) of [bmp] on a [w] x [h] grid, each point averaged over a small patch so
-     * fabric texture and camera noise do not count as movement. Fast: one pass over the pixels.
-     */
-    private fun lumaAt(bmp: Bitmap, w: Int, h: Int): FloatArray {
-        val bw = bmp.width
-        val bh = bmp.height
-        if (pixels.size != bw * bh) {
-            pixels = IntArray(bw * bh)
-            plane = FloatArray(bw * bh)
-        }
-        bmp.getPixels(pixels, 0, bw, 0, 0, bw, bh)
-        for (i in pixels.indices) plane[i] = lum(pixels[i])
-        val out = FloatArray(w * h)
-        for (y in 0 until h) {
-            val sy = (y * bh / h).coerceIn(1, bh - 2)
-            for (x in 0 until w) {
-                val sx = (x * bw / w).coerceIn(1, bw - 2)
-                val i = sy * bw + sx
-                out[y * w + x] = (plane[i] * 2f + plane[i - 1] + plane[i + 1] + plane[i - bw] + plane[i + bw]) / 6f
-            }
-        }
-        return out
-    }
-
-    private fun lum(c: Int) = (((c shr 16) and 0xFF) * 77 + ((c shr 8) and 0xFF) * 150 + (c and 0xFF) * 29) / 65280f
 
     fun close() {
         runCatching { segmenter.close() }
@@ -168,8 +108,6 @@ class PersonSegmenter(context: Context, highQuality: Boolean, allowGpu: Boolean 
 
     companion object {
         private const val TAG = "PersonSegmenter"
-        /** Temporal smoothing of still edges: higher is steadier. Moving edges are not smoothed. */
-        private const val SMOOTHING = 0.6f
         const val MODEL_HQ = "selfie_multiclass_256x256.tflite"
         const val MODEL_FAST = "selfie_segmenter.tflite"
     }

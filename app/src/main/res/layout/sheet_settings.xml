@@ -66,14 +66,14 @@
                 style="@style/Widget.Material3.Chip.Filter"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Best edges" />
+                android:text="Best hair detail (fast phones only, may slow the video)" />
 
             <com.google.android.material.chip.Chip
                 android:id="@+id/mFast"
                 style="@style/Widget.Material3.Chip.Filter"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Fast (older phones)" />
+                android:text="Smooth (recommended)" />
         </com.google.android.material.chip.ChipGroup>
 
         <TextView style="@style/SheetLabel" android:text="Edge softness" />
