@@ -1228,6 +1228,8 @@ class CompositeEngine(context: Context) {
             GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, alphaTex[alphaCur])
             GLES30.glUniform1i(loc("uAlpha"), 8)
             GLES30.glUniform1f(loc("uAlphaReady"), if (alphaReady && alphaTex[0] != 0) 1f else 0f)
+            // About 7 pixels of the alpha picture: a thin band, wider on bigger pictures.
+            GLES30.glUniform2f(loc("uWrapR"), if (alphaW > 0) 7f / alphaW else 0f, if (alphaH > 0) 7f / alphaH else 0f)
         }
 
         GLES30.glUniform1i(loc("uFrame"), 0)
@@ -1535,6 +1537,7 @@ uniform float uOverlayOn;
 uniform sampler2D uAlpha;      // steadied cut-out of the current frame (world space)
 uniform sampler2D uAlphaPrev;  // the previous one (alpha pass only): r = alpha, g = brightness
 uniform float uAlphaReady;
+uniform vec2 uWrapR;           // light-wrap / soft-edge radius, in alpha texture units
 uniform float uHasPrev;
 out vec4 outColor;
 
@@ -1694,14 +1697,34 @@ void main() {
                  * smoothstep(0.0, uFeather.x, 1.0 - p.y) * smoothstep(0.0, uFeather.y, p.y);
 
     float m = 1.0;
+    float wrap = 0.0;
     if (uHasMask > 0.5) {
-        // Steadied cut-out from the alpha pass (falls back to computing it here).
-        m = uAlphaReady > 0.5 ? texture(uAlpha, clamp(p, 0.0, 1.0)).r : rawAlpha(p, cam);
+        if (uAlphaReady > 0.5) {
+            // Steadied cut-out from the alpha pass.
+            vec2 pc = clamp(p, 0.0, 1.0);
+            float a = texture(uAlpha, pc).r;
+            // How much of the area just around this point is you (8 taps on a small ring).
+            float ring = 0.0;
+            for (int k = 0; k < 8; k++) {
+                float ang = float(k) * 0.785398;
+                ring += texture(uAlpha, clamp(pc + vec2(cos(ang), sin(ang)) * uWrapR, 0.0, 1.0)).r;
+            }
+            ring /= 8.0;
+            // Softer outline: blend a little of the surrounding cut-out into the edge, so small
+            // errors read as natural soft focus instead of a hard cut.
+            m = mix(a, ring, 0.35);
+            // Light wrap: on your side of the edge, close to the background, let some of the new
+            // background's light fall onto you, as real light would.
+            wrap = a * (1.0 - ring);
+        } else {
+            m = rawAlpha(p, cam);
+        }
     }
     m = smoothstep(uEdge.x, uEdge.y, m) * inside;
+    wrap = clamp(wrap * 2.0, 0.0, 1.0) * m;
 
     vec3 bg = vec3(0.0);
-    if (m > 0.998) {
+    if (m > 0.998 && wrap < 0.004) {
         // Fully covered by you: the background is not visible here, skip it.
     } else if (uMode < 1.5) {
         // Blur only the background: taps on the person are left out, so dark hair or clothes
@@ -1731,11 +1754,15 @@ void main() {
             bg = texture(uBg, bt).rgb;
         }
     }
+    vec3 you = adjust(cam);
+    // Light wrap (screen-style, so it only ever brightens or tints a little, never darkens you).
+    vec3 lit = 1.0 - (1.0 - you) * (1.0 - bg * 0.55);
+    you = mix(you, lit, wrap * 0.6);
     vec3 c;
     if (uLogoBehind > 0.5) {
-        c = mix(withLogo(bg), adjust(cam), m);   // logo on the wall, behind you
+        c = mix(withLogo(bg), you, m);   // logo on the wall, behind you
     } else {
-        c = withLogo(mix(bg, adjust(cam), m));   // logo on top, like a TV logo
+        c = withLogo(mix(bg, you, m));   // logo on top, like a TV logo
     }
     outColor = vec4(withOverlay(c), 1.0);
 }
