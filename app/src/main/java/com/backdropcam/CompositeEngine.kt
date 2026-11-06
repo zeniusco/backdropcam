@@ -536,6 +536,7 @@ class CompositeEngine(context: Context) {
         bufW = request.resolution.width
         bufH = request.resolution.height
         geometryReady = false
+        geometrySig = -1
         invalidateMask()
 
         val st = SurfaceTexture(oesTex)
@@ -556,6 +557,17 @@ class CompositeEngine(context: Context) {
      * Works out, from the SurfaceTexture transform itself, whether the phone already rotated and
      * mirrored the camera image. This differs between phones, so we detect instead of assuming.
      */
+    private var geometrySig = -1
+
+    /** Which way the camera transform turns and mirrors the picture, as a small number. */
+    private fun geometrySignature(): Int {
+        val a00 = stMatrix[0]; val a10 = stMatrix[1]
+        val a01 = stMatrix[4]; val a11 = stMatrix[5]
+        val swaps = abs(a00) < abs(a10)
+        val mirrored = (a00 * a11 - a01 * a10) > 0f
+        return (if (swaps) 1 else 0) or (if (mirrored) 2 else 0)
+    }
+
     private fun computeGeometry() {
         val a00 = stMatrix[0]; val a10 = stMatrix[1]
         val a01 = stMatrix[4]; val a11 = stMatrix[5]
@@ -594,7 +606,18 @@ class CompositeEngine(context: Context) {
             return
         }
         st.getTransformMatrix(stMatrix)
-        if (!geometryReady) computeGeometry()
+        // The first frames after the camera (re)starts can carry a temporary transform, and the
+        // real one arrives a moment later. Re-check every frame and redo the geometry when the
+        // rotation or mirroring changes, so the picture never stays sideways.
+        val sig = geometrySignature()
+        if (!geometryReady || sig != geometrySig) {
+            if (geometryReady) {
+                presentPendingUpTo(Long.MAX_VALUE)
+                invalidateMask()
+            }
+            geometrySig = sig
+            computeGeometry()
+        }
 
         // Front camera is a mirror view at this point; un-mirror it if the user turned mirroring off.
         val personMirror = if (isFront && !mirrorFront) flipXC() else identity()
