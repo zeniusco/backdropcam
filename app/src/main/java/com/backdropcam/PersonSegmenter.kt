@@ -133,23 +133,28 @@ class PersonSegmenter(context: Context, highQuality: Boolean, allowGpu: Boolean 
 
     private var pixels = IntArray(0)
 
-    /** Brightness (0..1) of [bmp] sampled on a [w] x [h] grid, lightly averaged against noise. */
+    private var plane = FloatArray(0)
+
+    /**
+     * Brightness (0..1) of [bmp] on a [w] x [h] grid, each point averaged over a small patch so
+     * fabric texture and camera noise do not count as movement. Fast: one pass over the pixels.
+     */
     private fun lumaAt(bmp: Bitmap, w: Int, h: Int): FloatArray {
         val bw = bmp.width
         val bh = bmp.height
-        if (pixels.size != bw * bh) pixels = IntArray(bw * bh)
+        if (pixels.size != bw * bh) {
+            pixels = IntArray(bw * bh)
+            plane = FloatArray(bw * bh)
+        }
         bmp.getPixels(pixels, 0, bw, 0, 0, bw, bh)
+        for (i in pixels.indices) plane[i] = lum(pixels[i])
         val out = FloatArray(w * h)
         for (y in 0 until h) {
-            val sy = (y * bh / h).coerceIn(0, bh - 2)
+            val sy = (y * bh / h).coerceIn(1, bh - 2)
             for (x in 0 until w) {
-                val sx = (x * bw / w).coerceIn(0, bw - 2)
-                // 3 x 3 average: fabric texture and camera noise must not count as movement.
-                val x0 = (sx - 1).coerceAtLeast(0)
-                val y0 = (sy - 1).coerceAtLeast(0)
-                var sum = 0f
-                for (yy in y0..y0 + 2) for (xx in x0..x0 + 2) sum += lum(pixels[yy.coerceAtMost(bh - 1) * bw + xx.coerceAtMost(bw - 1)])
-                out[y * w + x] = sum / 9f
+                val sx = (x * bw / w).coerceIn(1, bw - 2)
+                val i = sy * bw + sx
+                out[y * w + x] = (plane[i] * 2f + plane[i - 1] + plane[i + 1] + plane[i - bw] + plane[i + bw]) / 6f
             }
         }
         return out

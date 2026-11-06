@@ -287,8 +287,8 @@ class MainActivity : AppCompatActivity() {
                 if (settings.handsFree && recorder == null && countdown == null && !speaker.isSpeaking) coach.update(f)
             }
             framingWanted = settings.handsFree
-            onTooSlow = { fastPreview = true; easeForSlowPhone() }
-            fastPreview = settings.lowEndPhone || settings.safeMode
+            onTooSlow = { lightMode = true; easeForSlowPhone() }
+            lightMode = settings.lowEndPhone || settings.safeMode
         }
         speaker = Speaker(this)
         coach = FramingCoach { speak(it) }
@@ -912,7 +912,12 @@ class MainActivity : AppCompatActivity() {
         val hq = settings.highQualityCutout
         io.execute {
             try {
-                engine.setSegmenter(PersonSegmenter(this, hq, allowGpu = !settings.safeMode))
+                val gpu = !settings.safeMode
+                val closeUpModel = PersonSegmenter(this, hq, allowGpu = gpu)
+                // A light second model for the whole picture, next to the detailed close-up.
+                // Weak phones run only one pass, so they skip it.
+                val whole = if (settings.lowEndPhone || settings.safeMode) null else PersonSegmenter(this, false, allowGpu = gpu)
+                engine.setSegmenter(closeUpModel, whole)
             } catch (e: Exception) {
                 main.post { hint("Could not load the cut-out model") }
             }

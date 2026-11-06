@@ -108,14 +108,16 @@ class CompositeEngine(context: Context) {
         var capturedMs = 0L
         var encode = false
         var ptsNs = 0L
-        var shown = false
     }
 
     /**
-     * Weak phones: show each frame on screen at once with the newest cut-out available, instead
-     * of waiting for its own. The recording still waits, so the saved video stays exact.
+     * Weak phones: one cut-out pass per frame (the whole picture) instead of two (whole picture
+     * plus a detailed close-up), so they can keep up.
      */
-    @Volatile var fastPreview = false
+    @Volatile var lightMode = false
+
+    /** The newest frame waiting for the model to be free (older waiting frames are skipped). */
+    private var queued: Slot? = null
 
     // Steadied cut-out (alpha), ping-ponged between two textures in world space.
     private val alphaTex = IntArray(2)
@@ -167,8 +169,11 @@ class CompositeEngine(context: Context) {
 
     // ------------------------------------------------------------------ segmentation
     @Volatile private var segmenter: PersonSegmenter? = null
+    /** Second, light model for the whole-picture pass that runs next to the close-up pass. */
+    @Volatile private var fullSegmenter: PersonSegmenter? = null
     private val segBusy = AtomicBoolean(false)
     private var segBitmap: Bitmap? = null
+    private var segFullBitmap: Bitmap? = null
     private val readBuf: ByteBuffer = ByteBuffer.allocateDirect(ROI_SIZE * ROI_SIZE * 4).order(ByteOrder.nativeOrder())
     private var maskGen = 0
     // Two masks: one of the whole picture (always available, a little coarser) and one of the
@@ -179,7 +184,6 @@ class CompositeEngine(context: Context) {
     private val fullRect = floatArrayOf(0f, 0f, 1f, 1f)
     private var roiReady = false
     private val roiRect = floatArrayOf(0f, 0f, 1f, 1f)
-    private var segCount = 0L
     /** Crop to segment next, decided from the last mask (null = whole picture). */
     @Volatile private var nextRoi: FloatArray? = null
     private var lastRoi: FloatArray? = null
@@ -237,13 +241,19 @@ class CompositeEngine(context: Context) {
         handler.post { attachCamera(request, front, sensorRotationDegrees) }
     }
 
-    /** Swaps the segmentation model. The old one is closed on the segmentation thread. */
-    fun setSegmenter(newSegmenter: PersonSegmenter) {
+    /**
+     * Swaps the segmentation models: [newSegmenter] for the detailed close-up of the person and
+     * [newFull] (a light model) for the whole picture. Old ones are closed on the model thread.
+     */
+    fun setSegmenter(newSegmenter: PersonSegmenter, newFull: PersonSegmenter? = null) {
         try {
             segExecutor.execute {
                 val old = segmenter
+                val oldFull = fullSegmenter
                 segmenter = newSegmenter
+                fullSegmenter = newFull
                 old?.close()
+                oldFull?.close()
             }
             handler.post { invalidateMask() }
         } catch (e: RejectedExecutionException) {
@@ -388,7 +398,7 @@ class CompositeEngine(context: Context) {
     fun setDeviceRotation(degrees: Int) {
         handler.post {
             if (!rotationLocked && degrees != deviceRotation) {
-                presentPendingUpTo(Long.MAX_VALUE)
+                dropPending()
                 deviceRotation = degrees
                 invalidateMask()
             }
@@ -433,7 +443,7 @@ class CompositeEngine(context: Context) {
     ) {
         handler.post {
             if (rotation != deviceRotation) {
-                presentPendingUpTo(Long.MAX_VALUE)
+                dropPending()
                 deviceRotation = rotation
                 invalidateMask()
             }
@@ -448,7 +458,7 @@ class CompositeEngine(context: Context) {
     /** [done] runs on the GL thread once the encoder has received its last frame. */
     fun stopRecording(done: () -> Unit) {
         handler.post {
-            presentPendingUpTo(Long.MAX_VALUE) // flush frames still waiting for their mask
+            dropPending() // frames still waiting for their own cut-out are left out, never mismatched
             if (encoderSurface != EGL14.EGL_NO_SURFACE) {
                 makeCurrentAny()
                 EGL14.eglDestroySurface(display, encoderSurface)
@@ -538,14 +548,17 @@ class CompositeEngine(context: Context) {
             }
             thread.quitSafely()
         }
-        segExecutor.execute { segmenter?.close(); segmenter = null }
+        segExecutor.execute {
+            segmenter?.close(); segmenter = null
+            fullSegmenter?.close(); fullSegmenter = null
+        }
         segExecutor.shutdown()
     }
 
     // ================================================================== camera input
 
     private fun attachCamera(request: SurfaceRequest, front: Boolean, sensorDeg: Int) {
-        presentPendingUpTo(Long.MAX_VALUE)
+        dropPending()
         cameraSurface?.release()
         cameraTexture?.release()
         isFront = front
@@ -666,7 +679,7 @@ class CompositeEngine(context: Context) {
         if (!geometryReady || sigChangeFrames >= 3) {
             sigChangeFrames = 0
             if (geometryReady) {
-                presentPendingUpTo(Long.MAX_VALUE)
+                dropPending()
                 invalidateMask()
             }
             geometrySig = sig
@@ -682,9 +695,9 @@ class CompositeEngine(context: Context) {
         ensureSmallTarget()
         if (ring.isEmpty()) return
 
-        // 1. Copy the frame into the ring (a slot still waiting is shown first, with the latest mask).
-        val slot = ring[(frameCounter % ring.size).toInt()]
-        if (slot.pending) presentPendingUpTo(slot.id)
+        // 1. Copy the frame into a free place in the ring. Frames still waiting for their own
+        //    cut-out are never overwritten; if all are waiting, this camera frame is skipped.
+        val slot = ring.firstOrNull { !it.pending } ?: return
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, slot.fbo)
         GLES30.glViewport(0, 0, ringW, ringH)
         GLES30.glUseProgram(copyProgram)
@@ -704,38 +717,38 @@ class CompositeEngine(context: Context) {
         slot.capturedMs = now
         slot.encode = encoderSurface != EGL14.EGL_NO_SURFACE && !recordPaused()
         slot.ptsNs = if (slot.encode) recordPts() else 0L
-        slot.shown = false
-        if (fastPreview && (mode != MODE_NONE || framingWanted) && segmenter != null) {
-            computeAlpha(slot)
-            showOnScreen(slot)
-            slot.shown = true
-        }
 
-        // 2. Segment it, or show it straight away when no cut-out is needed.
+        // 2. Show it straight away when no cut-out is needed.
         val wanted = (mode != MODE_NONE || framingWanted) && segmenter != null
         if (!wanted) {
-            presentPendingUpTo(slot.id)
+            dropPending(except = slot)
+            present(slot)
             return
         }
-        if (segBusy.compareAndSet(false, true)) submitSegmentation(slot)
-        // Safety net: never hold a frame for long if the model is slow or failing.
-        val stale = ring.filter { it.pending && now - it.capturedMs > MAX_WAIT_MS }.maxOfOrNull { it.id }
-        if (stale != null) presentPendingUpTo(stale)
+        // 3. Every frame that is shown or recorded gets a cut-out made from that very frame, so
+        //    the cut-out can never lag behind (or run ahead of) your movement. When the model is
+        //    still busy, the newest frame waits for it and older waiting frames are skipped.
+        queued?.let { if (it !== slot) skip(it) }
+        queued = null
+        if (segBusy.compareAndSet(false, true)) submitSegmentation(slot) else queued = slot
+        // Safety net: a model that hangs must not freeze the picture.
+        ring.filter { it.pending && it !== queued && now - it.capturedMs > MAX_WAIT_MS }.forEach { present(it) }
     }
 
-    /** Cuts the square crop around the person out of [slot] and sends it to the model. */
-    private fun submitSegmentation(slot: Slot) {
-        val (ww, wh) = worldSize()
-        val crop = nextRoi
-        val whole = crop == null || !fullReady || segCount++ % 4 == 0L
-        val roi = if (whole) fullRoi(ww, wh) else crop!!
-        // Smoothing only makes sense between masks of the same region; the whole picture and the
-        // crop each keep their own history.
-        val roiChanged = if (whole) lastFullRoi?.contentEquals(roi) != true else lastRoi?.contentEquals(roi) != true
-        if (whole) lastFullRoi = roi else lastRoi = roi
+    /** Leaves a frame out (it never got its own cut-out). */
+    private fun skip(slot: Slot) {
+        slot.pending = false
+        if (queued === slot) queued = null
+    }
 
+    private fun dropPending(except: Slot? = null) {
+        ring.filter { it.pending && it !== except }.forEach { skip(it) }
+        queued = null
+    }
+
+    /** Renders [roi] of [slot] into [bmp] (ROI_SIZE square, rows top to bottom). */
+    private fun readCrop(slot: Slot, roi: FloatArray, bmp: Bitmap) {
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, roiFbo)
-        // Output row 0 = top of the crop, so the read-back Bitmap is upright.
         val wFromOut = identity().also {
             Matrix.translateM(it, 0, roi[0], roi[3], 0f)
             Matrix.scaleM(it, 0, roi[2] - roi[0], -(roi[3] - roi[1]), 1f)
@@ -744,36 +757,72 @@ class CompositeEngine(context: Context) {
         readBuf.clear()
         GLES30.glReadPixels(0, 0, ROI_SIZE, ROI_SIZE, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, readBuf)
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
-        val bmp = segBitmap ?: Bitmap.createBitmap(ROI_SIZE, ROI_SIZE, Bitmap.Config.ARGB_8888).also { segBitmap = it }
         readBuf.rewind()
         bmp.copyPixelsFromBuffer(readBuf)
+    }
+
+    /**
+     * Segments [slot]: always the whole picture, and (unless in light mode) also a detailed
+     * close-up around the person. Both come from this same frame, so every part of the cut-out
+     * matches it exactly. When done, the frame is shown and recorded.
+     */
+    private fun submitSegmentation(slot: Slot) {
+        val (ww, wh) = worldSize()
+        val full = fullRoi(ww, wh)
+        val closeUp = !lightMode && fullSegmenter != null
+        val crop = if (closeUp) nextRoi else null
+        val fullChanged = lastFullRoi?.contentEquals(full) != true
+        lastFullRoi = full
+        val cropChanged = crop != null && lastRoi?.contentEquals(crop) != true
+        if (crop != null) lastRoi = crop
+
+        val bmpFull = segFullBitmap ?: Bitmap.createBitmap(ROI_SIZE, ROI_SIZE, Bitmap.Config.ARGB_8888).also { segFullBitmap = it }
+        readCrop(slot, full, bmpFull)
+        val bmpCrop = if (crop != null) {
+            (segBitmap ?: Bitmap.createBitmap(ROI_SIZE, ROI_SIZE, Bitmap.Config.ARGB_8888).also { segBitmap = it })
+                .also { readCrop(slot, crop, it) }
+        } else null
 
         val id = slot.id
         val gen = maskGen
         val mirroredView = isFront && mirrorFront
         try {
             segExecutor.execute {
-                var mask: PersonSegmenter.Mask? = null
+                var fullMask: PersonSegmenter.Mask? = null
+                var cropMask: PersonSegmenter.Mask? = null
                 try {
                     val t0 = SystemClock.uptimeMillis()
-                    mask = segmenter?.segment(bmp, resetSmoothing = roiChanged, stream = if (whole) 0 else 1)
+                    val wholeModel = if (closeUp) fullSegmenter else segmenter
+                    fullMask = wholeModel?.segment(bmpFull, resetSmoothing = fullChanged, stream = 0)
+                    if (crop != null && bmpCrop != null) {
+                        cropMask = segmenter?.segment(bmpCrop, resetSmoothing = cropChanged, stream = 1)
+                    }
                     noteSegmentationTime(SystemClock.uptimeMillis() - t0)
-                    if (mask != null) {
-                        // A whole-picture pass decides the crop afresh (it may have drifted);
-                        // a crop pass keeps it unless the person nears its edge.
-                        nextRoi = chooseNextRoi(mask, roi, ww, wh, whole)
-                        if (whole) reportFraming(mask, bmp, roi, mirroredView)
+                    if (fullMask != null) {
+                        nextRoi = if (closeUp) chooseNextRoi(fullMask, full, ww, wh, true) else null
+                        reportFraming(fullMask, bmpFull, full, mirroredView)
                     }
                 } catch (t: Throwable) {
                     Log.e(TAG, "segmentation failed", t)
                 } finally {
                     segBusy.set(false)
-                    val m = mask
+                    val fm = fullMask
+                    val cm = cropMask
                     handler.post {
-                        val t0 = SystemClock.uptimeMillis()
-                        if (m != null && gen == maskGen) uploadMask(m, roi, whole)
-                        presentPendingUpTo(id) // this frame (and any skipped before it) can now be shown
-                        noteGlBusy(SystemClock.uptimeMillis() - t0)
+                        val t1 = SystemClock.uptimeMillis()
+                        if (gen == maskGen && fm != null) {
+                            uploadMask(fm, full, true)
+                            if (cm != null && crop != null) uploadMask(cm, crop, false) else roiReady = false
+                        }
+                        // Show and record this frame with its own cut-out.
+                        if (slot.pending && slot.id == id) present(slot)
+                        // Then start on the newest frame that waited meanwhile.
+                        val q = queued
+                        if (q != null && q.pending && segBusy.compareAndSet(false, true)) {
+                            queued = null
+                            submitSegmentation(q)
+                        }
+                        noteGlBusy(SystemClock.uptimeMillis() - t1)
                     }
                 }
             }
@@ -924,24 +973,13 @@ class CompositeEngine(context: Context) {
 
     // ================================================================== showing / recording frames
 
-    /** Shows (and records) every waiting frame up to [id], oldest first, with the current mask. */
-    private fun presentPendingUpTo(id: Long) {
-        while (true) {
-            val next = ring.filter { it.pending && it.id <= id }.minByOrNull { it.id } ?: return
-            present(next)
-        }
-    }
-
     private fun present(slot: Slot) {
         slot.pending = false
+        if (queued === slot) queued = null
         makeCurrentAny()
-        if (!slot.shown || slot.encode) computeAlpha(slot)
+        computeAlpha(slot)
         maybeSnapshot(slot)
-        if (!slot.shown) {
-            showOnScreen(slot)
-        } else if (slot.encode && (mode == MODE_BLUR || (mode == MODE_IMAGE && !bgReady))) {
-            updateBlurSource(slot)
-        }
+        showOnScreen(slot)
         if (slot.encode && encoderSurface != EGL14.EGL_NO_SURFACE) {
             EGL14.eglMakeCurrent(display, encoderSurface, encoderSurface, eglContext)
             val (cx, cy) = cropW()
@@ -962,7 +1000,7 @@ class CompositeEngine(context: Context) {
         if (ww == 0 || wh == 0) return
         // Enough detail for sharp edges, without costing much: 1440 px on the long side
         // (960 on weak phones).
-        val cap = if (fastPreview) 960f else 1440f
+        val cap = if (lightMode) 960f else 1440f
         val s = min(1f, cap / max(ww, wh))
         val w = (ww * s).roundToInt().coerceAtLeast(2)
         val h = (wh * s).roundToInt().coerceAtLeast(2)
@@ -1323,7 +1361,7 @@ class CompositeEngine(context: Context) {
         /** Side of the square crop given to the model (it works at 256 internally). */
         private const val ROI_SIZE = 320
         /** Never hold a frame longer than this waiting for its mask. */
-        private const val MAX_WAIT_MS = 250L
+        private const val MAX_WAIT_MS = 1000L
 
         const val MODE_NONE = 0   // plain camera, no background replacement
         const val MODE_BLUR = 1   // blurred real background
