@@ -130,8 +130,6 @@ class MainActivity : AppCompatActivity() {
 
     // Adjust panel
     private var adjustOpen = false
-    private var logoOpen = false
-    private var logoTwistAngle: Float? = null
     private var lastFraming: CompositeEngine.Framing? = null
     private var backdropMean: FloatArray? = null
 
@@ -172,8 +170,6 @@ class MainActivity : AppCompatActivity() {
                 .show()
         }
 
-    private val pickLogo =
-        registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri -> if (uri != null) addLogo(uri) }
 
     private val pickBackdrop =
         registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri -> if (uri != null) addBackdrop(uri) }
@@ -237,7 +233,6 @@ class MainActivity : AppCompatActivity() {
         setupGestures()
         setupButtons()
         setupAdjustPanel()
-        setupLogoPanel()
 
         updateMicUi()
         updateTimerUi()
@@ -448,7 +443,6 @@ class MainActivity : AppCompatActivity() {
         ui.timerChip.setOnClickListener { cycleTimer() }
         ui.micBtn.setOnClickListener { onMicPressed() }
         ui.tuneBtn.setOnClickListener { setAdjustOpen(!adjustOpen) }
-        ui.logoBtn.setOnClickListener { onLogoButton() }
         ui.remoteBtn.setOnClickListener { showRemoteSheet() }
         ui.teleBtn.setOnClickListener { showScriptsSheet() }
         // Tap the script to pause / resume scrolling (also handy for rehearsing).
@@ -655,7 +649,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateLensRowVisibility() {
-        ui.zoomRow.visibility = if (ui.zoomRow.childCount > 0 && !adjustOpen && !logoOpen) View.VISIBLE else View.GONE
+        ui.zoomRow.visibility = if (ui.zoomRow.childCount > 0 && !adjustOpen) View.VISIBLE else View.GONE
     }
 
     /** FULL fills the screen (the video is cropped to the screen's shape); 16:9 and 4:3 show it all. */
@@ -753,10 +747,6 @@ class MainActivity : AppCompatActivity() {
     private fun setupGestures() {
         val scale = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
             override fun onScale(d: ScaleGestureDetector): Boolean {
-                if (logoOpen) {
-                    updateLogo { it.copy(size = (it.size * d.scaleFactor).coerceIn(0.05f, 0.9f)) }
-                    return true
-                }
                 if (adjustOpen) {
                     settings.personScale = (settings.personScale * d.scaleFactor).coerceIn(0.5f, 1f)
                     if (adjustTab != AdjustTab.SIZE) selectAdjustTab(AdjustTab.SIZE, explain = false)
@@ -782,10 +772,6 @@ class MainActivity : AppCompatActivity() {
                 val dx = -distanceX / ui.surface.width
                 val dy = -distanceY / ui.surface.height
                 when {
-                    logoOpen -> {
-                        val (wx, wy) = screenToWorld(dx, dy)
-                        updateLogo { it.copy(x = (it.x + wx).coerceIn(0f, 1f), y = (it.y + wy).coerceIn(0f, 1f)) }
-                    }
                     adjustOpen -> movePerson(dx, dy)
                     else -> return false
                 }
@@ -793,7 +779,6 @@ class MainActivity : AppCompatActivity() {
             }
         })
         ui.surface.setOnTouchListener { _, e ->
-            if (logoOpen) twistLogo(e)
             scale.onTouchEvent(e)
             if (!scale.isInProgress) tap.onTouchEvent(e)
             true
@@ -943,7 +928,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun applyBackdropSelection() {
         highlightSelection()
-        applyLogo()
         when (val key = settings.backdrop) {
             KEY_NONE -> engine.setMode(CompositeEngine.MODE_NONE)
             KEY_BLUR -> engine.setMode(CompositeEngine.MODE_BLUR)
@@ -983,12 +967,12 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private enum class AdjustTab { SIZE, LIGHT, WARMTH }
+    private enum class AdjustTab { SIZE, LIGHT }
 
     private var adjustTab = AdjustTab.SIZE
 
     /**
-     * One slider, three icon tabs (size / brightness / warmth). Keeps the panel short so it never
+     * One slider, two icon tabs (size / brightness). Keeps the panel short so it never
      * covers you while you watch the effect.
      */
     private fun setupAdjustPanel() {
@@ -997,18 +981,16 @@ class MainActivity : AppCompatActivity() {
             when (adjustTab) {
                 AdjustTab.SIZE -> settings.personScale = v / 100f
                 AdjustTab.LIGHT -> settings.brightness = v / 100f
-                AdjustTab.WARMTH -> settings.warmth = v / 100f
             }
             updateAdjustValue()
             applyPersonAndColor()
         }
         ui.tabSize.setOnClickListener { selectAdjustTab(AdjustTab.SIZE, explain = true) }
         ui.tabLight.setOnClickListener { selectAdjustTab(AdjustTab.LIGHT, explain = true) }
-        ui.tabWarmth.setOnClickListener { selectAdjustTab(AdjustTab.WARMTH, explain = true) }
         ui.autoMatchBtn.setOnClickListener { autoMatchLight() }
         ui.resetAdjustBtn.setOnClickListener {
             settings.personScale = 1f; settings.personOffX = 0f; settings.personOffY = 0f
-            settings.brightness = 0f; settings.warmth = 0f
+            settings.brightness = 0f
             selectAdjustTab(adjustTab, explain = false)
             applyPersonAndColor()
             hint("Size, position and light reset")
@@ -1030,17 +1012,15 @@ class MainActivity : AppCompatActivity() {
         } else {
             s.valueFrom = -100f
             s.valueTo = 100f
-            s.value = ((if (tab == AdjustTab.LIGHT) settings.brightness else settings.warmth) * 100f).coerceIn(-100f, 100f)
+            s.value = (settings.brightness * 100f).coerceIn(-100f, 100f)
         }
         setActive(ui.tabSize, tab == AdjustTab.SIZE)
         setActive(ui.tabLight, tab == AdjustTab.LIGHT)
-        setActive(ui.tabWarmth, tab == AdjustTab.WARMTH)
         updateAdjustValue()
         if (explain) hint(
             when (tab) {
                 AdjustTab.SIZE -> "Size: make yourself smaller over the backdrop. Drag the picture to move."
                 AdjustTab.LIGHT -> "Brightness of you (not the backdrop)"
-                AdjustTab.WARMTH -> "Warmth of you: left cooler, right warmer"
             }
         )
     }
@@ -1049,7 +1029,6 @@ class MainActivity : AppCompatActivity() {
         ui.adjustValue.text = when (adjustTab) {
             AdjustTab.SIZE -> "${(settings.personScale * 100f).roundToInt()}%"
             AdjustTab.LIGHT -> signed(settings.brightness)
-            AdjustTab.WARMTH -> signed(settings.warmth)
         }
     }
 
@@ -1060,12 +1039,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun applyPersonAndColor() {
         engine.setPersonTransform(settings.personScale, settings.personOffX, settings.personOffY)
-        engine.setColorAdjust(2f.pow(settings.brightness), settings.warmth)
+        engine.setColorAdjust(2f.pow(settings.brightness), 0f)
     }
 
     /** The adjust panel replaces the lens switch and backdrop strip while open, to save space. */
     private fun setAdjustOpen(open: Boolean) {
-        if (open && logoOpen) setLogoOpen(false)
         adjustOpen = open
         ui.adjustPanel.visibility = if (open) View.VISIBLE else View.GONE
         ui.stripScroll.visibility = if (open) View.GONE else View.VISIBLE
@@ -1114,7 +1092,7 @@ class MainActivity : AppCompatActivity() {
         applyPersonAndColor()
     }
 
-    /** Sets brightness and warmth so you match the backdrop's light. */
+    /** Sets your brightness so you match the backdrop's light. */
     private fun autoMatchLight() {
         val bg = backdropMean
         val f = lastFraming
@@ -1126,11 +1104,8 @@ class MainActivity : AppCompatActivity() {
         val lp = lum(f.meanR, f.meanG, f.meanB).coerceAtLeast(0.02f)
         val lb = lum(bg[0], bg[1], bg[2]).coerceAtLeast(0.02f)
         val gainValue = (lb / lp).pow(0.6f).coerceIn(0.6f, 1.7f)
-        val tp = (f.meanR - f.meanB) / (lp + 0.05f)
-        val tb = (bg[0] - bg[2]) / (lb + 0.05f)
         settings.brightness = (ln(gainValue) / ln(2f)).coerceIn(-1f, 1f)
-        settings.warmth = ((tb - tp) * 3f).coerceIn(-1f, 1f)
-        selectAdjustTab(if (adjustTab == AdjustTab.SIZE) AdjustTab.LIGHT else adjustTab, explain = false)
+        selectAdjustTab(AdjustTab.LIGHT, explain = false)
         applyPersonAndColor()
         hint("Matched to the backdrop's light")
     }
@@ -1934,122 +1909,6 @@ class MainActivity : AppCompatActivity() {
         editScript(null, title, text)
     }
 
-    // ================================================================== logo
-
-    private fun setupLogoPanel() {
-        ui.logoOpacity.addOnChangeListener { _, v, fromUser ->
-            if (fromUser) updateLogo { it.copy(opacity = v / 100f) }
-        }
-        ui.logoPickBtn.setOnClickListener {
-            if (!busy()) pickLogo.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-        }
-        ui.logoShowBtn.setOnClickListener {
-            settings.logoOn = !settings.logoOn
-            applyLogo()
-            hint(if (settings.logoOn) "Logo shown" else "Logo hidden")
-        }
-        ui.logoLayerBtn.setOnClickListener {
-            updateLogo { it.copy(behind = !it.behind) }
-            hint(if (logoPlacement().behind) "Logo behind you, like a sign on the wall" else "Logo in front of you, like a TV logo")
-        }
-        ui.logoDeleteBtn.setOnClickListener {
-            MaterialAlertDialogBuilder(this)
-                .setTitle("Remove the logo?")
-                .setPositiveButton("Remove") { _, _ ->
-                    backdrops.deleteLogo()
-                    engine.setLogo(null)
-                    setLogoOpen(false)
-                    updateLogoButton()
-                }
-                .setNegativeButton("Cancel", null)
-                .show()
-        }
-        ui.logoDoneBtn.setOnClickListener { setLogoOpen(false) }
-        io.execute {
-            val bmp = backdrops.loadLogo()
-            if (bmp != null) engine.setLogo(bmp)
-        }
-        applyLogo()
-    }
-
-    private fun onLogoButton() {
-        when {
-            logoOpen -> setLogoOpen(false)
-            !backdrops.hasLogo -> {
-                if (!busy()) pickLogo.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-            }
-            else -> setLogoOpen(true)
-        }
-    }
-
-    private fun addLogo(uri: Uri) {
-        io.execute {
-            try {
-                val bmp = backdrops.saveLogo(uri)
-                engine.setLogo(bmp)
-                main.post {
-                    settings.logoOn = true
-                    applyLogo()
-                    setLogoOpen(true)
-                    hint("Drag to move the logo, pinch to resize, twist with two fingers to rotate")
-                }
-            } catch (e: Exception) {
-                main.post { hint("Could not use that image") }
-            }
-        }
-    }
-
-    /** The logo panel replaces the lens switch and backdrops while open; gestures move the logo. */
-    private fun setLogoOpen(open: Boolean) {
-        if (open && adjustOpen) setAdjustOpen(false)
-        logoOpen = open
-        ui.logoPanel.visibility = if (open) View.VISIBLE else View.GONE
-        ui.stripScroll.visibility = if (open || adjustOpen) View.GONE else View.VISIBLE
-        updateLensRowVisibility()
-        updateLogoButton()
-        if (open) applyLogo()
-    }
-
-    private fun logoPlacement() = settings.logoPlacement(settings.backdrop)
-
-    /** Changes this backdrop's logo placement and shows it at once. */
-    private fun updateLogo(change: (LogoPlacement) -> LogoPlacement) {
-        settings.setLogoPlacement(settings.backdrop, change(logoPlacement()))
-        applyLogo()
-    }
-
-    private fun applyLogo() {
-        val p = logoPlacement()
-        engine.setLogoPlacement(settings.logoOn && backdrops.hasLogo, p)
-        ui.logoOpacity.value = (p.opacity * 100f).coerceIn(10f, 100f)
-        ui.logoValue.text = "${(p.opacity * 100f).roundToInt()}%"
-        ui.logoShowBtn.setImageResource(if (settings.logoOn) R.drawable.ic_visibility else R.drawable.ic_visibility_off)
-        ui.logoLayerBtn.setImageResource(if (p.behind) R.drawable.ic_flip_to_back else R.drawable.ic_flip_to_front)
-        updateLogoButton()
-    }
-
-    private fun updateLogoButton() = setActive(ui.logoBtn, logoOpen || (settings.logoOn && backdrops.hasLogo))
-
-    /** Two-finger twist rotates the logo. */
-    private fun twistLogo(e: MotionEvent) {
-        if (e.pointerCount < 2 || e.actionMasked == MotionEvent.ACTION_POINTER_UP) {
-            logoTwistAngle = null
-            return
-        }
-        val angle = Math.toDegrees(
-            kotlin.math.atan2((e.getY(1) - e.getY(0)).toDouble(), (e.getX(1) - e.getX(0)).toDouble())
-        ).toFloat()
-        val last = logoTwistAngle
-        if (last != null && e.actionMasked == MotionEvent.ACTION_MOVE) {
-            var delta = angle - last
-            if (delta > 180f) delta -= 360f
-            if (delta < -180f) delta += 360f
-            // Screen angles grow clockwise; the logo's rotation grows counter-clockwise.
-            updateLogo { it.copy(rotation = (it.rotation - delta) % 360f) }
-        }
-        logoTwistAngle = angle
-    }
-
     // ================================================================== second-screen remote
 
     private var remote: RemoteServer? = null
@@ -2184,8 +2043,7 @@ class MainActivity : AppCompatActivity() {
             ui.settingsBtn, ui.flashBtn, ui.aspectChip, ui.qualityChip, ui.timerChip,
             ui.micBtn, ui.tuneBtn, ui.teleBtn,
             ui.pauseBtn, ui.flipBtn, ui.lastThumb, ui.countdownText, ui.recPill, ui.hintText,
-            ui.tabSize, ui.tabLight, ui.tabWarmth, ui.adjustValue, ui.logoBtn, ui.remoteBtn,
-            ui.logoPickBtn, ui.logoShowBtn, ui.logoLayerBtn, ui.logoDeleteBtn, ui.logoDoneBtn, ui.logoValue,
+            ui.tabSize, ui.tabLight, ui.adjustValue, ui.remoteBtn,
             ui.autoMatchBtn, ui.resetAdjustBtn, ui.doneAdjustBtn
         )
         for (i in 0 until ui.zoomRow.childCount) views += ui.zoomRow.getChildAt(i)

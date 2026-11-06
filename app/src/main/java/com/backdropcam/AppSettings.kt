@@ -143,9 +143,6 @@ class AppSettings(context: Context) {
         get() = p.getFloat("brightness", 0f)
         set(v) = p.edit().putFloat("brightness", v).apply()
 
-    var warmth: Float
-        get() = p.getFloat("warmth", 0f)
-        set(v) = p.edit().putFloat("warmth", v).apply()
 
     /** Seconds, 0 = off */
     var autoStop: Int
@@ -167,17 +164,6 @@ class AppSettings(context: Context) {
     var teleScript: String?
         get() = p.getString("teleScript", null)
         set(v) = p.edit().putString("teleScript", v).apply()
-
-    /** Logo overlay switched on (needs a logo image saved in the app). */
-    var logoOn: Boolean
-        get() = p.getBoolean("logoOn", true)
-        set(v) = p.edit().putBoolean("logoOn", v).apply()
-
-    /** Logo position per backdrop ("none", "blur" or a backdrop file), so each can differ. */
-    fun logoPlacement(backdrop: String): LogoPlacement =
-        p.getString("logo_$backdrop", null)?.let(LogoPlacement::parse) ?: LogoPlacement()
-
-    fun setLogoPlacement(backdrop: String, v: LogoPlacement) = p.edit().putString("logo_$backdrop", v.toString()).apply()
 
     /** H.265/HEVC for about half the file size; off = H.264 for very old players. */
     var smallFiles: Boolean

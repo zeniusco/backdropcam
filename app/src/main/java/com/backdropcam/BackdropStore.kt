@@ -66,26 +66,6 @@ class BackdropStore(private val context: Context) {
     fun delete(name: String) {
         file(name).delete()
     }
-
-    // ---------------------------------------------------------------- logo (one, kept as PNG)
-
-    private val logoFile = File(context.filesDir, "logo.png")
-
-    val hasLogo: Boolean get() = logoFile.exists()
-
-    /** Saves a picked image as the logo, keeping its transparency. */
-    fun saveLogo(uri: Uri): Bitmap {
-        val bmp = ImageUtils.decode({ context.contentResolver.openInputStream(uri)!! }, 1024)
-            ?: error("Unsupported image")
-        logoFile.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
-        return bmp
-    }
-
-    fun loadLogo(): Bitmap? = if (logoFile.exists()) ImageUtils.decode({ logoFile.inputStream() }, 1024) else null
-
-    fun deleteLogo() {
-        logoFile.delete()
-    }
 }
 
 object ImageUtils {
