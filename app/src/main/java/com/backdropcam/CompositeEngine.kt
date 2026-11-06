@@ -442,6 +442,61 @@ class CompositeEngine(context: Context) {
         }
     }
 
+    /**
+     * Receives a small upright copy of the finished picture about 8 times a second, for the
+     * remote viewer. Called on the GL thread; the bitmap is reused, so copy or compress at once.
+     */
+    @Volatile var snapshotListener: ((Bitmap) -> Unit)? = null
+    /** Snapshots are only made while this says someone is watching. */
+    @Volatile var snapshotWanted: () -> Boolean = { false }
+    private var snapFbo = 0
+    private var snapTex = 0
+    private var snapW = 0
+    private var snapH = 0
+    private var snapBitmap: Bitmap? = null
+    private var snapBuf: ByteBuffer? = null
+    private var lastSnapMs = 0L
+
+    private fun maybeSnapshot(slot: Slot) {
+        val listener = snapshotListener ?: return
+        if (!snapshotWanted()) return
+        val now = SystemClock.uptimeMillis()
+        if (now - lastSnapMs < 120) return
+        lastSnapMs = now
+        val (ww, wh) = worldSize()
+        val (cx, cy) = cropW()
+        if (ww == 0 || wh == 0) return
+        val vw = ww * cx; val vh = wh * cy
+        val s = 640f / max(vw, vh)
+        val w = ((vw * s).roundToInt() / 2) * 2
+        val h = ((vh * s).roundToInt() / 2) * 2
+        if (w != snapW || h != snapH) {
+            if (snapTex == 0) {
+                val t = IntArray(1); GLES30.glGenTextures(1, t, 0); snapTex = t[0]
+                val f = IntArray(1); GLES30.glGenFramebuffers(1, f, 0); snapFbo = f[0]
+            }
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, snapTex)
+            GLES30.glTexImage2D(GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA, w, h, 0, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, null)
+            setLinear(GLES30.GL_TEXTURE_2D)
+            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, snapFbo)
+            GLES30.glFramebufferTexture2D(GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0, GLES30.GL_TEXTURE_2D, snapTex, 0)
+            snapW = w; snapH = h
+            snapBuf = ByteBuffer.allocateDirect(w * h * 4).order(ByteOrder.nativeOrder())
+            snapBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        }
+        makeCurrentAny()
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, snapFbo)
+        // Same view as the recording, flipped so rows come out top first.
+        render(snapW, snapH, mul(scaleC(cx, cy), flipYC()), mode, slot.tex)
+        val buf = snapBuf!!
+        buf.clear()
+        GLES30.glReadPixels(0, 0, snapW, snapH, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, buf)
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+        buf.rewind()
+        snapBitmap!!.copyPixelsFromBuffer(buf)
+        runCatching { listener(snapBitmap!!) }
+    }
+
     /** Converts a tap on the preview (0..1, y down) into camera buffer coordinates (0..1, y down). */
     fun previewToCameraPoint(x: Float, yDown: Float): FloatArray? {
         val m = focusMatrix ?: return null
@@ -762,6 +817,8 @@ class CompositeEngine(context: Context) {
 
     private fun present(slot: Slot) {
         slot.pending = false
+        makeCurrentAny()
+        maybeSnapshot(slot)
         makeCurrentAny()
         if (mode == MODE_BLUR || (mode == MODE_IMAGE && !bgReady)) {
             GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, smallFbo)

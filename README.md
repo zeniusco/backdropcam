@@ -22,6 +22,15 @@ Every push builds an APK. Download `BackdropCam.apk` from the latest
 - Teleprompter for the front camera: type, paste, share text in, or import .txt / .docx
 - Volume buttons and Bluetooth selfie remotes start and stop recording
 - Google Drive upload with an "anyone with the link" URL
+- Formats: 9:16 (Reels/Shorts, or 16:9 sideways for YouTube), FULL, 1:1 square, 4:3
+- Logo overlay: drag, pinch, twist, opacity, in front of or behind you, per backdrop
+- Brand kit: name title (lower third), brand colour, intro card; share the kit as a .zip
+- Trim (no re-encoding) and one-tap delete and retake
+- Video backdrops (looping, silent)
+- Background music mixed under your voice, quieter while you speak
+- Live captions in the video and an .srt subtitle file (English, offline)
+- Teleprompter that follows your voice
+- Second-screen remote: watch and control from any browser on the same Wi-Fi
 
 ## Google Drive setup (one time)
 

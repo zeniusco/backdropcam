@@ -59,6 +59,9 @@ dependencies {
     implementation("com.google.android.gms:play-services-auth:21.3.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
+    // QR code for the second-phone remote link
+    implementation("com.google.zxing:core:3.5.3")
+
     // Offline, always-on keyword listening ("start", "stop") without system beeps
     implementation("com.alphacephei:vosk-android:0.3.47")
     implementation("net.java.dev.jna:jna:5.13.0@aar")

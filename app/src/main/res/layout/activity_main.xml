@@ -219,6 +219,13 @@
             android:src="@drawable/ic_branding_watermark" />
 
         <ImageButton
+            android:id="@+id/remoteBtn"
+            style="@style/RailIcon"
+            android:layout_marginTop="4dp"
+            android:contentDescription="Second-screen remote"
+            android:src="@drawable/ic_cast" />
+
+        <ImageButton
             android:id="@+id/teleBtn"
             style="@style/RailIcon"
             android:layout_marginTop="4dp"

@@ -64,6 +64,7 @@ import androidx.core.widget.TextViewCompat
 import com.backdropcam.databinding.ActivityMainBinding
 import com.backdropcam.databinding.DialogScriptBinding
 import com.backdropcam.databinding.DialogTrimBinding
+import com.backdropcam.databinding.SheetRemoteBinding
 import com.backdropcam.databinding.SheetMicBinding
 import com.backdropcam.databinding.SheetResultBinding
 import com.backdropcam.databinding.SheetScriptsBinding
@@ -322,6 +323,7 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         teleRunning = false
+        remote?.stop()
         voice.close()
         speaker.shutdown()
         engine.release()
@@ -382,6 +384,7 @@ class MainActivity : AppCompatActivity() {
         ui.handsBtn.setOnClickListener { if (!busy()) setHandsFree(!settings.handsFree) }
         ui.tuneBtn.setOnClickListener { setAdjustOpen(!adjustOpen) }
         ui.logoBtn.setOnClickListener { onLogoButton() }
+        ui.remoteBtn.setOnClickListener { showRemoteSheet() }
         ui.teleBtn.setOnClickListener { showScriptsSheet() }
         // Tap the script to pause / resume scrolling (also handy for rehearsing).
         ui.teleBox.setOnClickListener { teleRunning = !teleRunning }
@@ -2005,6 +2008,92 @@ class MainActivity : AppCompatActivity() {
         logoTwistAngle = angle
     }
 
+    // ================================================================== second-screen remote
+
+    private var remote: RemoteServer? = null
+    private val remoteExecutor = Executors.newSingleThreadExecutor()
+
+    private fun startRemote(): RemoteServer? {
+        remote?.let { return it }
+        val server = RemoteServer(
+            status = {
+                val rec = recorder
+                RemoteServer.Status(
+                    recording = rec != null,
+                    paused = rec?.paused == true,
+                    seconds = (rec?.ptsNs() ?: 0L) / 1_000_000_000L,
+                    countdown = countdown != null,
+                )
+            },
+            onCommand = { a ->
+                main.post {
+                    when (a) {
+                        "record" -> onRecordPressed()
+                        "pause" -> togglePause()
+                    }
+                }
+            },
+        )
+        if (!server.start()) return null
+        remote = server
+        engine.snapshotWanted = { server.wantsFrames }
+        engine.snapshotListener = { bmp ->
+            val copy = bmp.copy(Bitmap.Config.ARGB_8888, false)
+            remoteExecutor.execute {
+                server.pushFrame(copy)
+                copy.recycle()
+            }
+        }
+        setActive(ui.remoteBtn, true)
+        return server
+    }
+
+    private fun stopRemote() {
+        engine.snapshotListener = null
+        engine.snapshotWanted = { false }
+        remote?.stop()
+        remote = null
+        setActive(ui.remoteBtn, false)
+    }
+
+    private fun showRemoteSheet() {
+        val b = SheetRemoteBinding.inflate(layoutInflater)
+        val dlg = BottomSheetDialog(this)
+        dlg.setContentView(b.root)
+        fun refresh() {
+            val server = remote
+            val url = server?.urls()?.firstOrNull()
+            b.remoteSwitch.isChecked = server != null
+            b.remoteQr.visibility = if (url != null) View.VISIBLE else View.GONE
+            b.remoteShareBtn.visibility = if (url != null) View.VISIBLE else View.GONE
+            b.remoteUrl.text = when {
+                server == null -> ""
+                url == null -> "Connect this phone to Wi-Fi (or turn on its hotspot), then open this again."
+                else -> url
+            }
+            if (url != null) {
+                io.execute {
+                    val qr = runCatching { qrBitmap(url, 512) }.getOrNull()
+                    main.post { b.remoteQr.setImageBitmap(qr) }
+                }
+                b.remoteShareBtn.setOnClickListener { shareText(url) }
+            }
+        }
+        b.remoteSwitch.setOnCheckedChangeListener { _, on ->
+            if (on && remote == null && startRemote() == null) hint("Could not start the remote")
+            if (!on) stopRemote()
+            refresh()
+        }
+        refresh()
+        dlg.show()
+    }
+
+    private fun qrBitmap(text: String, size: Int): Bitmap {
+        val m = com.google.zxing.qrcode.QRCodeWriter().encode(text, com.google.zxing.BarcodeFormat.QR_CODE, size, size)
+        val px = IntArray(size * size) { i -> if (m.get(i % size, i / size)) 0xFF000000.toInt() else 0xFFFFFFFF.toInt() }
+        return Bitmap.createBitmap(px, size, size, Bitmap.Config.ARGB_8888)
+    }
+
     // ================================================================== text overlay and brand kit
 
     /** Redraws the text layer (name title, intro card, captions) for the current picture shape. */
@@ -2112,7 +2201,7 @@ class MainActivity : AppCompatActivity() {
             ui.settingsBtn, ui.flashBtn, ui.aspectChip, ui.qualityChip, ui.timerChip,
             ui.micBtn, ui.handsBtn, ui.tuneBtn, ui.teleBtn,
             ui.pauseBtn, ui.flipBtn, ui.lastThumb, ui.countdownText, ui.recPill, ui.hintText,
-            ui.tabSize, ui.tabLight, ui.tabWarmth, ui.adjustValue, ui.logoBtn,
+            ui.tabSize, ui.tabLight, ui.tabWarmth, ui.adjustValue, ui.logoBtn, ui.remoteBtn,
             ui.logoPickBtn, ui.logoShowBtn, ui.logoLayerBtn, ui.logoDeleteBtn, ui.logoDoneBtn, ui.logoValue,
             ui.autoMatchBtn, ui.resetAdjustBtn, ui.doneAdjustBtn
         )
