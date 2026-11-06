@@ -275,6 +275,7 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         foreground = true
+        engine.setBackdropVideoPlaying(true)
         if (orientationListener.canDetectOrientation()) orientationListener.enable()
         startListening()
     }
@@ -282,6 +283,7 @@ class MainActivity : AppCompatActivity() {
     override fun onPause() {
         super.onPause()
         foreground = false
+        engine.setBackdropVideoPlaying(false)
         orientationListener.disable()
         cancelCountdown(announce = false)
         if (recorder != null) stopRecording()
@@ -743,6 +745,16 @@ class MainActivity : AppCompatActivity() {
                 scaleType = ImageView.ScaleType.CENTER_CROP
             }
             tile.addView(iv)
+            if (backdrops.isVideo(file.name)) {
+                tile.addView(ImageView(this).apply {
+                    setImageResource(R.drawable.ic_play_arrow)
+                    background = ContextCompat.getDrawable(context, R.drawable.bg_circle_dark)
+                    setPadding(dp(2), dp(2), dp(2), dp(2))
+                    layoutParams = FrameLayout.LayoutParams(dp(20), dp(20), Gravity.END or Gravity.BOTTOM).apply {
+                        setMargins(0, 0, dp(4), dp(4))
+                    }
+                })
+            }
             io.execute {
                 val t = backdrops.thumbnail(file)
                 main.post { iv.setImageBitmap(t) }
@@ -770,7 +782,7 @@ class MainActivity : AppCompatActivity() {
         }
         tile.setOnClickListener {
             if (key == KEY_ADD) {
-                if (!busy()) pickBackdrop.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                if (!busy()) pickBackdrop.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
             } else {
                 settings.backdrop = key
                 applyBackdropSelection()
@@ -807,6 +819,14 @@ class MainActivity : AppCompatActivity() {
             KEY_NONE -> engine.setMode(CompositeEngine.MODE_NONE)
             KEY_BLUR -> engine.setMode(CompositeEngine.MODE_BLUR)
             else -> io.execute {
+                val file = backdrops.file(key)
+                if (backdrops.isVideo(key) && file.exists()) {
+                    val frame = backdrops.videoFrame(file, 512)
+                    backdropMean = frame?.let { ImageUtils.meanColor(it) }
+                    val aspect = frame?.let { it.width.toFloat() / it.height } ?: (16f / 9f)
+                    engine.setBackdropVideo(file.absolutePath, aspect)
+                    return@execute
+                }
                 val bmp = backdrops.load(key)
                 if (bmp != null) {
                     backdropMean = ImageUtils.meanColor(bmp)
@@ -829,7 +849,7 @@ class MainActivity : AppCompatActivity() {
                     applyBackdropSelection()
                 }
             } catch (e: Exception) {
-                main.post { hint("Could not use that image") }
+                main.post { hint("Could not use that file: ${e.message}") }
             }
         }
     }

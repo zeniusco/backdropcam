@@ -235,11 +235,75 @@ class CompositeEngine(context: Context) {
     }
 
     fun setMode(newMode: Int) {
-        handler.post { mode = newMode }
+        handler.post {
+            if (newMode != MODE_IMAGE) stopBackdropVideo() // no need to keep decoding it
+            mode = newMode
+        }
+    }
+
+    // Video backdrop: a looping, muted MediaPlayer drawing into its own external texture.
+    private var bgVideoTex = 0
+    private var bgVideoSt: SurfaceTexture? = null
+    private var bgVideoSurface: Surface? = null
+    private var bgPlayer: android.media.MediaPlayer? = null
+    private var bgIsVideo = false
+    private val bgVideoMatrix = FloatArray(16).also { Matrix.setIdentityM(it, 0) }
+
+    /** Plays [path] (a video file) as a looping, silent backdrop. */
+    fun setBackdropVideo(path: String, aspect: Float) {
+        handler.post {
+            stopBackdropVideo()
+            makeCurrentAny()
+            val st = SurfaceTexture(bgVideoTex)
+            st.setOnFrameAvailableListener({
+                runCatching {
+                    makeCurrentAny()
+                    it.updateTexImage()
+                    it.getTransformMatrix(bgVideoMatrix)
+                    bgReady = true
+                }
+            }, handler)
+            val surface = Surface(st)
+            bgVideoSt = st
+            bgVideoSurface = surface
+            try {
+                bgPlayer = android.media.MediaPlayer().apply {
+                    setDataSource(path)
+                    setSurface(surface)
+                    isLooping = true
+                    setVolume(0f, 0f)
+                    setOnPreparedListener { it.start() }
+                    prepareAsync()
+                }
+                bgAspect = aspect
+                bgIsVideo = true
+                mode = MODE_IMAGE
+            } catch (e: Exception) {
+                Log.e(TAG, "backdrop video failed", e)
+                stopBackdropVideo()
+            }
+        }
+    }
+
+    /** Pauses / resumes a video backdrop (with the app in the background). */
+    fun setBackdropVideoPlaying(play: Boolean) {
+        handler.post {
+            val p = bgPlayer ?: return@post
+            runCatching { if (play) p.start() else p.pause() }
+        }
+    }
+
+    private fun stopBackdropVideo() {
+        bgPlayer?.run { runCatching { stop() }; release() }
+        bgPlayer = null
+        bgVideoSurface?.release(); bgVideoSurface = null
+        bgVideoSt?.release(); bgVideoSt = null
+        bgIsVideo = false
     }
 
     fun setBackdrop(bitmap: Bitmap) {
         handler.post {
+            stopBackdropVideo()
             makeCurrentAny()
             GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, bgTex)
             GLUtils.texImage2D(GLES30.GL_TEXTURE_2D, 0, bitmap, 0)
@@ -388,6 +452,7 @@ class CompositeEngine(context: Context) {
 
     fun release() {
         handler.post {
+            stopBackdropVideo()
             destroyPreview()
             cameraSurface?.release(); cameraTexture?.release()
             if (display != EGL14.EGL_NO_DISPLAY) {
@@ -823,6 +888,11 @@ class CompositeEngine(context: Context) {
         GLES30.glActiveTexture(GLES30.GL_TEXTURE6)
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, overlayTex)
         GLES30.glUniform1i(loc("uOverlay"), 6)
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE7)
+        GLES30.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, bgVideoTex)
+        GLES30.glUniform1i(loc("uBgVideo"), 7)
+        GLES30.glUniform1f(loc("uBgIsVideo"), if (bgIsVideo) 1f else 0f)
+        GLES30.glUniformMatrix4fv(loc("uBgVideoM"), 1, false, bgVideoMatrix, 0)
         GLES30.glUniform1f(loc("uOverlayOn"), if (overlayOn && renderMode != MODE_RAW) 1f else 0f)
 
         GLES30.glUniform1i(loc("uFrame"), 0)
@@ -932,6 +1002,11 @@ class CompositeEngine(context: Context) {
         GLES30.glGenTextures(8, t, 0)
         oesTex = t[0]; maskTex = t[1]; bgTex = t[2]; smallTex = t[3]; roiTex = t[4]; logoTex = t[5]; maskFullTex = t[6]
         overlayTex = t[7]
+        val vt = IntArray(1)
+        GLES30.glGenTextures(1, vt, 0)
+        bgVideoTex = vt[0]
+        GLES30.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, bgVideoTex)
+        setLinear(GLES11Ext.GL_TEXTURE_EXTERNAL_OES)
         val f = IntArray(2)
         GLES30.glGenFramebuffers(2, f, 0)
         smallFbo = f[0]; roiFbo = f[1]
@@ -1078,6 +1153,7 @@ void main() {
 """
 
         private const val FRAGMENT = """#version 300 es
+#extension GL_OES_EGL_image_external_essl3 : require
 precision highp float;
 in vec2 vW;
 uniform sampler2D uFrame;   // upright camera frame (natural space), with mipmaps
@@ -1087,6 +1163,9 @@ uniform vec4 uFullRect;
 uniform float uHasRoi;
 uniform sampler2D uSmall;   // small copy of the picture, for the blur effect
 uniform sampler2D uBg;
+uniform samplerExternalOES uBgVideo;
+uniform mat4 uBgVideoM;
+uniform float uBgIsVideo;
 uniform mat4 uNFromW;
 uniform float uMode;
 uniform float uHasMask;
@@ -1228,7 +1307,12 @@ void main() {
         bg = acc / 25.0;
     } else {
         vec2 visible = (vW - 0.5) / uCrop + 0.5; // backdrop fills the visible (cropped) area
-        bg = texture(uBg, (img(visible) - 0.5) * uBgScale + 0.5).rgb;
+        vec2 bt = (img(visible) - 0.5) * uBgScale + 0.5;  // rows top to bottom
+        if (uBgIsVideo > 0.5) {
+            bg = texture(uBgVideo, (uBgVideoM * vec4(bt.x, 1.0 - bt.y, 0.0, 1.0)).xy).rgb;
+        } else {
+            bg = texture(uBg, bt).rgb;
+        }
     }
     vec3 c;
     if (uLogoBehind > 0.5) {

@@ -16,12 +16,23 @@ class BackdropStore(private val context: Context) {
     private val dir = File(context.filesDir, "backdrops").apply { mkdirs() }
 
     fun list(): List<File> =
-        dir.listFiles { f -> f.name.endsWith(".jpg") }?.sortedByDescending { it.lastModified() } ?: emptyList()
+        dir.listFiles { f -> f.name.endsWith(".jpg") || f.name.endsWith(".mp4") }
+            ?.sortedByDescending { it.lastModified() } ?: emptyList()
+
+    fun isVideo(name: String) = name.endsWith(".mp4")
 
     fun file(name: String) = File(dir, name)
 
-    /** Copies (and downsizes) a picked image into app storage. */
+    /** Copies a picked image (downsized) or video (as is, up to 300 MB) into app storage. */
     fun add(uri: Uri): File {
+        val type = context.contentResolver.getType(uri) ?: ""
+        if (type.startsWith("video/")) {
+            val size = context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length } ?: -1L
+            if (size > 300L * 1024 * 1024) error("Video is too large (over 300 MB)")
+            val f = File(dir, "bd_${System.currentTimeMillis()}.mp4")
+            context.contentResolver.openInputStream(uri)!!.use { input -> f.outputStream().use { input.copyTo(it) } }
+            return f
+        }
         val bmp = ImageUtils.decode({ context.contentResolver.openInputStream(uri)!! }, 3840)
             ?: error("Unsupported image")
         val f = File(dir, "bd_${System.currentTimeMillis()}.jpg")
@@ -36,7 +47,21 @@ class BackdropStore(private val context: Context) {
         return ImageUtils.decode({ f.inputStream() }, 4096)
     }
 
-    fun thumbnail(f: File): Bitmap? = ImageUtils.decode({ f.inputStream() }, 200)
+    fun thumbnail(f: File): Bitmap? =
+        if (isVideo(f.name)) videoFrame(f, 200) else ImageUtils.decode({ f.inputStream() }, 200)
+
+    /** First frame of a video backdrop, scaled to at most [maxSide]. */
+    fun videoFrame(f: File, maxSide: Int): Bitmap? = runCatching {
+        android.media.MediaMetadataRetriever().run {
+            setDataSource(f.absolutePath)
+            val frame = getFrameAtTime(0)
+            release()
+            frame?.let {
+                val s = maxSide.toFloat() / max(it.width, it.height)
+                if (s < 1f) Bitmap.createScaledBitmap(it, (it.width * s).toInt(), (it.height * s).toInt(), true) else it
+            }
+        }
+    }.getOrNull()
 
     fun delete(name: String) {
         file(name).delete()
