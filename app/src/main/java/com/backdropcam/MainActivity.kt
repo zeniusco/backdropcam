@@ -21,6 +21,10 @@ import android.os.Bundle
 import android.os.CountDownTimer
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
+import android.os.StatFs
+import android.provider.MediaStore
+import android.provider.Settings
 import android.util.TypedValue
 import android.view.GestureDetector
 import android.view.Gravity
@@ -158,7 +162,16 @@ class MainActivity : AppCompatActivity() {
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
             if (grants[Manifest.permission.CAMERA] == true) bindCamera()
-            else hint("BackdropCam needs camera access. Allow it in the phone's app settings.")
+            else MaterialAlertDialogBuilder(this)
+                .setTitle("Camera access needed")
+                .setMessage("BackdropCam records with the camera, so it cannot work without it. Allow Camera (and Microphone for sound) in the app's settings.")
+                .setPositiveButton("Open settings") { _, _ ->
+                    startActivitySafe(
+                        Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null))
+                    )
+                }
+                .setNegativeButton("Not now", null)
+                .show()
         }
 
     private val pickLogo =
@@ -297,7 +310,38 @@ class MainActivity : AppCompatActivity() {
         val needed = mutableListOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
         if (Build.VERSION.SDK_INT <= 28) needed += Manifest.permission.WRITE_EXTERNAL_STORAGE
         if (needed.all { granted(it) }) bindCamera() else permissionLauncher.launch(needed.toTypedArray())
+
+        if (settings.firstRun) {
+            settings.firstRun = false
+            main.postDelayed({
+                hint("Welcome. Pick a backdrop below (or Add your own), then press the red button to record.")
+            }, 1200)
+        }
+        watchTemperature()
     }
+
+    /** Long 4K recordings make phones hot; say so before the phone itself slows down. */
+    private fun watchTemperature() {
+        if (Build.VERSION.SDK_INT < 29) return
+        val pm = getSystemService(PowerManager::class.java) ?: return
+        var warned = false
+        runCatching {
+            pm.addThermalStatusListener(ContextCompat.getMainExecutor(this)) { status ->
+                if (status >= PowerManager.THERMAL_STATUS_SEVERE && !warned) {
+                    warned = true
+                    hint("The phone is getting hot. Let it cool down, or record in 1080p to ease the load.")
+                } else if (status <= PowerManager.THERMAL_STATUS_LIGHT) {
+                    warned = false
+                }
+            }
+        }
+    }
+
+    /** Free space on the storage where videos are saved, in MB (-1 if unknown). */
+    private fun freeSpaceMb(): Long = runCatching {
+        val dir = getExternalFilesDir(null) ?: filesDir
+        StatFs(dir.path).availableBytes / (1024 * 1024)
+    }.getOrDefault(-1L)
 
     override fun onResume() {
         super.onResume()
@@ -387,12 +431,23 @@ class MainActivity : AppCompatActivity() {
         ui.remoteBtn.setOnClickListener { showRemoteSheet() }
         ui.teleBtn.setOnClickListener { showScriptsSheet() }
         // Tap the script to pause / resume scrolling (also handy for rehearsing).
-        ui.teleBox.setOnClickListener { teleRunning = !teleRunning }
-        ui.teleText.setOnClickListener { teleRunning = !teleRunning }
+        val toggleTele = View.OnClickListener {
+            if (follower != null) hint("The script follows your voice while recording")
+            else teleRunning = !teleRunning
+        }
+        ui.teleBox.setOnClickListener(toggleTele)
+        ui.teleText.setOnClickListener(toggleTele)
         ui.recordBtn.setOnClickListener { onRecordPressed() }
         ui.pauseBtn.setOnClickListener { togglePause() }
         ui.flipBtn.setOnClickListener { flipCamera() }
         ui.lastThumb.setOnClickListener { lastVideo?.let { showResultSheet(it) } ?: hint("No recordings yet") }
+        ui.lastThumb.setOnLongClickListener {
+            // All recordings live in the gallery under Movies/BackdropCam.
+            startActivitySafe(
+                Intent(Intent.ACTION_VIEW).setDataAndType(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, "video/*")
+            )
+            true
+        }
         ui.lastThumb.roundCorners(dp(14))
     }
 
@@ -604,7 +659,7 @@ class MainActivity : AppCompatActivity() {
         val modes = listOf("169", "full", "11", "43")
         val labels = arrayOf(
             "9:16  Reels, Shorts, TikTok, Status (turn the phone sideways for YouTube 16:9)",
-            "FULL  Fills your screen edge to edge",
+            "FULL  Fills your screen edge to edge (the video gets your screen's shape, so other apps may add thin bars)",
             "1:1  Square, for Instagram and LinkedIn feeds",
             "4:3  The widest view this lens can see",
         )
@@ -1097,13 +1152,21 @@ class MainActivity : AppCompatActivity() {
         val nw = engine.naturalWidth
         val nh = engine.naturalHeight
         if (nw == 0 || nh == 0) return hint("Camera is not ready yet")
+        val free = freeSpaceMb()
+        if (free in 0..199) {
+            setShutter(false)
+            return hint("Not enough storage left to record ($free MB free). Free up some space first.")
+        }
+        if (free in 200..999) hint("Storage is getting low: about $free MB left")
         val rotation = deviceRotation
         val cw = (nw * cropX).roundToInt() and 1.inv()
         val ch = (nh * cropY).roundToInt() and 1.inv()
         val (ww, wh) = if (rotation % 180 == 0) cw to ch else ch to cw
         val size = VideoRecorder.pickEncoderSize(ww, wh)
         val audio = settings.micOn && granted(Manifest.permission.RECORD_AUDIO)
+        if (settings.micOn && !audio) hint("Recording without sound: microphone access is not allowed for BackdropCam")
         val listenForStop = settings.handsFree && audio
+        if (settings.handsFree && !audio) hint("Without sound, say nothing: tap the button or press a volume key to stop")
 
         // Captions / subtitle file / voice-following teleprompter all read the recording's sound.
         val wantText = audio && (settings.captionsOn || settings.srtOn || followActive())
@@ -1178,7 +1241,7 @@ class MainActivity : AppCompatActivity() {
         }
         setControlsEnabled(false)
         updateMicUi()
-        if (settings.introOn) {
+        if (settings.introOn && (settings.introTitle.isNotBlank() || settings.brandName.isNotBlank())) {
             introStartMs = System.currentTimeMillis()
             tickIntro()
         }
@@ -1462,7 +1525,10 @@ class MainActivity : AppCompatActivity() {
             updateOverlay()
         }
         b.introSwitch.isChecked = settings.introOn
-        b.introSwitch.setOnCheckedChangeListener { _, on -> settings.introOn = on }
+        b.introSwitch.setOnCheckedChangeListener { _, on ->
+            settings.introOn = on
+            if (on && settings.introTitle.isBlank() && settings.brandName.isBlank()) hint("Type an intro title or your name, or the card has nothing to show")
+        }
         fun drawColors() {
             b.brandColors.removeAllViews()
             for (c in OverlayComposer.BRAND_COLORS) {
@@ -1559,7 +1625,7 @@ class MainActivity : AppCompatActivity() {
                         val f = runCatching {
                             MediaMetadataRetriever().run {
                                 setDataSource(this@MainActivity, uri)
-                                getFrameAtTime((sec * 1_000_000).toLong(), MediaMetadataRetriever.OPTION_CLOSEST_SYNC).also { release() }
+                                frameAt(this, (sec * 1_000_000).toLong(), 720).also { release() }
                             }
                         }.getOrNull()
                         main.post { if (job == frameJob && f != null) b.trimFrame.setImageBitmap(f) }
@@ -1577,13 +1643,12 @@ class MainActivity : AppCompatActivity() {
                 MaterialAlertDialogBuilder(this)
                     .setTitle("Trim video")
                     .setView(b.root)
-                    .setPositiveButton("Save") { _, _ ->
+                    .setPositiveButton("Save copy") { _, _ ->
                         val (a, z) = b.trimRange.values
                         hint("Trimming…")
                         io.execute {
                             try {
                                 val out = Trimmer.trim(this, uri, (a * 1_000_000).toLong(), (z * 1_000_000).toLong())
-                                runCatching { contentResolver.delete(uri, null, null) }
                                 main.post {
                                     resultDialog.dismiss()
                                     lastVideo = out
@@ -1591,7 +1656,7 @@ class MainActivity : AppCompatActivity() {
                                     uploadMessage = null
                                     settings.lastVideo = out.toString()
                                     loadThumbInto(out, ui.lastThumb)
-                                    showResultSheet(out, "Trimmed · Movies/BackdropCam")
+                                    showResultSheet(out, "Trimmed copy · the original is still in your gallery")
                                 }
                             } catch (e: Exception) {
                                 main.post { hint("Could not trim: ${e.message}") }
@@ -1692,7 +1757,8 @@ class MainActivity : AppCompatActivity() {
         updateHandsFreeUi()
         coach.reset()
         if (on) {
-            hint("Hands-free on: say “start” to record, “stop” to finish")
+            if (!settings.micOn) hint("Hands-free on. Turn Record sound on (mic button) so it can hear “stop” while recording")
+            else hint("Hands-free on: say “start” to record, “stop” to finish")
             speak("Hands-free on. I will guide you into the frame. Say start to record, and say stop to finish.")
             loadVoice()
         } else {
@@ -1705,7 +1771,8 @@ class MainActivity : AppCompatActivity() {
 
     /** The offline speech model is needed by hands-free, captions and the voice-following teleprompter. */
     private fun needsSpeechModel() =
-        settings.handsFree || settings.captionsOn || settings.srtOn || (settings.teleFollow && settings.teleScript != null)
+        settings.handsFree || settings.captionsOn || settings.srtOn ||
+            (settings.teleFollow && settings.teleOn && settings.teleScript != null && settings.frontCamera)
 
     private var transcriber: LiveTranscriber? = null
     private var follower: ScriptFollower? = null
@@ -1798,6 +1865,7 @@ class MainActivity : AppCompatActivity() {
         val show = front && settings.teleOn && script != null && script.body.isNotBlank() && deviceRotation % 180 == 0
         ui.teleBox.visibility = if (show) View.VISIBLE else View.GONE
         if (!show) teleRunning = false
+        if (show && settings.teleFollow) loadVoice()
         if (script != null) ui.teleText.text = script.body
         ui.teleText.textSize = settings.teleSize.toFloat()
         setActive(ui.teleBtn, show)
@@ -1820,7 +1888,7 @@ class MainActivity : AppCompatActivity() {
         b.sizeSlider.addOnChangeListener { _, v, _ -> settings.teleSize = v.toInt(); updateTeleUi() }
         b.newScriptBtn.setOnClickListener { editScript(null, "", "") }
         b.importScriptBtn.setOnClickListener {
-            importScript.launch(arrayOf("text/plain", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"))
+            if (!busy()) importScript.launch(arrayOf("text/plain", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"))
         }
         val refresh = {
             b.scriptList.removeAllViews()
@@ -1905,7 +1973,7 @@ class MainActivity : AppCompatActivity() {
             if (fromUser) updateLogo { it.copy(opacity = v / 100f) }
         }
         ui.logoPickBtn.setOnClickListener {
-            pickLogo.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+            if (!busy()) pickLogo.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
         }
         ui.logoShowBtn.setOnClickListener {
             settings.logoOn = !settings.logoOn
@@ -2229,7 +2297,7 @@ class MainActivity : AppCompatActivity() {
             val bmp: Bitmap? = try {
                 MediaMetadataRetriever().run {
                     setDataSource(this@MainActivity, uri)
-                    getFrameAtTime(0).also { release() }
+                    frameAt(this, 0L, 320).also { release() }
                 }
             } catch (e: Exception) {
                 null
@@ -2245,6 +2313,21 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+    }
+
+    /** A video frame no larger than [maxSide] pixels (a full 4K frame would waste 30 MB). */
+    private fun frameAt(r: MediaMetadataRetriever, timeUs: Long, maxSide: Int): Bitmap? {
+        if (Build.VERSION.SDK_INT >= 27) {
+            val w = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+            val h = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+            if (w > 0 && h > 0) {
+                val s = maxSide.toFloat() / max(w, h)
+                if (s < 1f) return r.getScaledFrameAtTime(
+                    timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, (w * s).toInt().coerceAtLeast(1), (h * s).toInt().coerceAtLeast(1)
+                )
+            }
+        }
+        return r.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
     }
 
     private fun View.roundCorners(radiusPx: Int) {

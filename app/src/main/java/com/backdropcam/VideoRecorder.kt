@@ -92,8 +92,9 @@ class VideoRecorder(
     val startNs = System.nanoTime()
     val displayName = "BackdropCam_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".mp4"
 
-    val inputSurface: Surface
-    private val videoCodec: MediaCodec
+    lateinit var inputSurface: Surface
+        private set
+    private lateinit var videoCodec: MediaCodec
     private var audioCodec: MediaCodec? = null
     private var audioRecord: AudioRecord? = null
     private var videoThread: Thread? = null
@@ -105,7 +106,7 @@ class VideoRecorder(
     private var pfd: ParcelFileDescriptor? = null
     private var file: File? = null
     private val muxer: MediaMuxer
-    private val sink: MuxSink
+    private lateinit var sink: MuxSink
 
     init {
         muxer = if (Build.VERSION.SDK_INT >= 29) {
@@ -130,8 +131,24 @@ class VideoRecorder(
             MediaMuxer(f.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
         }
 
-        val audioOk = withAudio && setupAudio()
-        sink = MuxSink(muxer, if (audioOk) 2 else 1)
+        try {
+            val audioOk = withAudio && setupAudio()
+            sink = MuxSink(muxer, if (audioOk) 2 else 1)
+            videoCodec = createVideoEncoder()
+            inputSurface = videoCodec.createInputSurface()
+        } catch (t: Throwable) {
+            // Leave nothing behind: an empty, invisible "pending" video in the gallery.
+            runCatching { muxer.release() }
+            runCatching { audioCodec?.release() }
+            runCatching { audioRecord?.release() }
+            runCatching { pfd?.close() }
+            pendingUri?.let { runCatching { resolver.delete(it, null, null) } }
+            file?.delete()
+            throw t
+        }
+    }
+
+    private fun createVideoEncoder(): MediaCodec {
 
         // Bits per pixel per frame: HEVC needs about 40 % less than H.264 for the same quality.
         // 4K at 30 fps comes to ~12 Mbit/s (HEVC) or ~19 Mbit/s (H.264); 1080p to ~3 / ~5.
@@ -148,17 +165,17 @@ class VideoRecorder(
                 setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel51)
             }
         }
-        videoCodec = MediaCodec.createEncoderByType(videoMime)
+        val codec = MediaCodec.createEncoderByType(videoMime)
         try {
-            videoCodec.configure(vf, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            codec.configure(vf, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         } catch (e: Exception) {
             // Some (older) encoders reject High profile: retry with their defaults.
             vf.removeKey(MediaFormat.KEY_PROFILE)
             vf.removeKey(MediaFormat.KEY_LEVEL)
-            videoCodec.reset()
-            videoCodec.configure(vf, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            codec.reset()
+            codec.configure(vf, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         }
-        inputSurface = videoCodec.createInputSurface()
+        return codec
     }
 
     fun start() {
@@ -182,13 +199,14 @@ class VideoRecorder(
         audioCodec?.run { runCatching { stop() }; release() }
         audioRecord?.run { runCatching { stop() }; release() }
         val ok = sink.stop()
+        val why = failure ?: "Recording was too short"
 
         if (Build.VERSION.SDK_INT >= 29) {
             pfd?.close()
             val uri = pendingUri!!
             if (!ok) {
                 resolver.delete(uri, null, null)
-                error("Recording was too short")
+                error(why)
             }
             resolver.update(uri, ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }, null, null)
             return uri
@@ -196,7 +214,7 @@ class VideoRecorder(
         val f = file!!
         if (!ok) {
             f.delete()
-            error("Recording was too short")
+            error(why)
         }
         val latch = CountDownLatch(1)
         var scanned: Uri? = null
@@ -231,7 +249,7 @@ class VideoRecorder(
             }
             val af = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, SAMPLE_RATE, 1).apply {
                 setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
-                setInteger(MediaFormat.KEY_BIT_RATE, 192_000)
+                setInteger(MediaFormat.KEY_BIT_RATE, 128_000)
                 setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
             }
             val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
@@ -256,6 +274,7 @@ class VideoRecorder(
             var lastLevelMs = 0L
             var inputDone = false
             var outputDone = false
+            var readErrors = 0
             while (!outputDone) {
                 if (!inputDone && paused && audioRunning) {
                     rec.read(pcm, 0, pcm.size) // keep draining the mic, but drop the audio
@@ -268,6 +287,7 @@ class VideoRecorder(
                         if (audioRunning) {
                             val n = rec.read(pcm, 0, minOf(pcm.size, buf.remaining() / 2))
                             if (n > 0) {
+                                readErrors = 0
                                 if (audioResync) {
                                     audioBaseUs = nowUs - n * 1_000_000L / SAMPLE_RATE
                                     audioSamples = 0
@@ -289,7 +309,14 @@ class VideoRecorder(
                                 buf.order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().put(pcm, 0, n)
                                 codec.queueInputBuffer(idx, 0, n * 2, max(0L, ptsUs), 0)
                             } else {
+                                // The microphone gave nothing (another app may hold it). Keep the
+                                // video going; after a while give up on sound for this recording.
                                 codec.queueInputBuffer(idx, 0, 0, nowUs, 0)
+                                if (++readErrors > 200) {
+                                    audioRunning = false
+                                } else {
+                                    Thread.sleep(5)
+                                }
                             }
                         } else {
                             codec.queueInputBuffer(idx, 0, 0, nowUs, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
@@ -313,27 +340,37 @@ class VideoRecorder(
     private val trackIndex = intArrayOf(-1, -1)
     private val lastPts = longArrayOf(-1L, -1L)
 
-    /** Handles one output buffer. Returns true at end of stream. */
+    /** Why the recording failed (e.g. the storage filled up), or null. */
+    @Volatile private var failure: String? = null
+
+    /** Handles one output buffer. Returns true at end of stream (or once this track has failed). */
     private fun pump(codec: MediaCodec, info: MediaCodec.BufferInfo, slot: Int, timeoutUs: Long): Boolean {
-        val idx = codec.dequeueOutputBuffer(info, timeoutUs)
-        when {
-            idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> trackIndex[slot] = sink.addTrack(codec.outputFormat)
-            idx >= 0 -> {
-                val buf = codec.getOutputBuffer(idx)!!
-                if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) info.size = 0
-                if (info.size > 0 && trackIndex[slot] >= 0 && info.presentationTimeUs > lastPts[slot] &&
-                    info.presentationTimeUs <= cutoffUs
-                ) {
-                    lastPts[slot] = info.presentationTimeUs
-                    buf.position(info.offset)
-                    buf.limit(info.offset + info.size)
-                    sink.write(trackIndex[slot], buf, info)
+        try {
+            val idx = codec.dequeueOutputBuffer(info, timeoutUs)
+            when {
+                idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> trackIndex[slot] = sink.addTrack(codec.outputFormat)
+                idx >= 0 -> {
+                    val buf = codec.getOutputBuffer(idx)!!
+                    if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) info.size = 0
+                    if (info.size > 0 && trackIndex[slot] >= 0 && info.presentationTimeUs > lastPts[slot] &&
+                        info.presentationTimeUs <= cutoffUs && failure == null
+                    ) {
+                        lastPts[slot] = info.presentationTimeUs
+                        buf.position(info.offset)
+                        buf.limit(info.offset + info.size)
+                        sink.write(trackIndex[slot], buf, info)
+                    }
+                    codec.releaseOutputBuffer(idx, false)
+                    if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) return true
                 }
-                codec.releaseOutputBuffer(idx, false)
-                if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) return true
             }
+            return false
+        } catch (t: Throwable) {
+            // Typically the storage is full or the encoder died. Stop writing; finish() reports it.
+            if (failure == null) failure = if (t is java.io.IOException || t.message?.contains("space", true) == true)
+                "The phone's storage is full" else "Recording failed: ${t.message ?: t.javaClass.simpleName}"
+            return true
         }
-        return false
     }
 
     /** Starts the muxer once every track is known and queues early samples until then. */
@@ -344,22 +381,33 @@ class VideoRecorder(
         private var started = false
         private var samples = 0
         private val pending = ArrayList<Pending>()
+        private var firstTrackMs = 0L
 
+        /** @return the muxer track, or -1 when the muxer already started without this track. */
         @Synchronized fun addTrack(format: MediaFormat): Int {
+            if (started) return -1
             val i = muxer.addTrack(format)
-            added++
-            if (added == expectedTracks) {
-                muxer.start()
-                started = true
-                pending.forEach { muxer.writeSampleData(it.track, ByteBuffer.wrap(it.data), it.info) }
-                samples += pending.size
-                pending.clear()
-            }
+            if (added++ == 0) firstTrackMs = System.currentTimeMillis()
+            if (added == expectedTracks) start()
             return i
         }
 
+        private fun start() {
+            muxer.start()
+            started = true
+            pending.forEach { muxer.writeSampleData(it.track, ByteBuffer.wrap(it.data), it.info) }
+            samples += pending.size
+            pending.clear()
+        }
+
         @Synchronized fun write(track: Int, buf: ByteBuffer, info: MediaCodec.BufferInfo) {
+            if (!started && added > 0 && System.currentTimeMillis() - firstTrackMs > 2500) {
+                // The other track (normally the sound) never showed up: save the video without it
+                // rather than losing the whole recording.
+                start()
+            }
             if (started) {
+                if (track < 0) return
                 muxer.writeSampleData(track, buf, info)
                 samples++
             } else {

@@ -45,14 +45,15 @@ class OverlayComposer {
         val c = Canvas(bmp)
         val unit = min(w, h) / 100f // 1 % of the short side
 
-        if (s.showNameTitle && s.name.isNotBlank()) drawNameTitle(c, w, h, unit, s)
+        // With captions showing, the name title moves up so the two never overlap.
+        if (s.showNameTitle && s.name.isNotBlank()) drawNameTitle(c, w, h, unit, s, if (s.caption.isNotBlank()) unit * 14f else 0f)
         if (s.caption.isNotBlank()) drawCaption(c, w, h, unit, s.caption)
         if (s.introAlpha > 0f) drawIntro(c, w, h, unit, s)
         return bmp
     }
 
     /** Lower third: a coloured bar with name and role, bottom left, above any captions. */
-    private fun drawNameTitle(c: Canvas, w: Int, h: Int, unit: Float, s: State) {
+    private fun drawNameTitle(c: Canvas, w: Int, h: Int, unit: Float, s: State, lift: Float) {
         val namePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.WHITE
             textSize = unit * 5.2f
@@ -66,7 +67,7 @@ class OverlayComposer {
         val textW = max(namePaint.measureText(s.name), if (s.role.isBlank()) 0f else rolePaint.measureText(s.role))
         val boxH = pad * 2 + namePaint.textSize + if (s.role.isBlank()) 0f else rolePaint.textSize * 1.35f
         val left = unit * 5f
-        val bottom = h - unit * 18f
+        val bottom = h - unit * 18f - lift
         val top = bottom - boxH
         val bar = unit * 1.4f
         val box = RectF(left, top, left + bar + pad * 2 + textW, bottom)

@@ -44,7 +44,8 @@ class RemoteServer(
     @Volatile private var encoding = false
     /** True while the last picture is still being compressed; the caller then skips a frame. */
     val busy: Boolean get() = encoding
-    @Volatile var viewers = 0; private set
+    private val viewerCount = java.util.concurrent.atomic.AtomicInteger(0)
+    val viewers: Int get() = viewerCount.get()
 
     /** True while someone has the live picture open (so frames only get made when needed). */
     val wantsFrames: Boolean get() = running && viewers > 0
@@ -134,7 +135,7 @@ class RemoteServer(
 
     /** MJPEG: a never-ending multipart response, one JPEG part per picture (up to 20 per second). */
     private fun stream(out: OutputStream) {
-        viewers++
+        viewerCount.incrementAndGet()
         try {
             out.write(("HTTP/1.1 200 OK\r\nCache-Control: no-cache\r\nConnection: close\r\n" +
                 "Content-Type: multipart/x-mixed-replace; boundary=frame\r\n\r\n").toByteArray())
@@ -152,7 +153,7 @@ class RemoteServer(
                 synchronized(frameLock) { if (latestJpeg === last) frameLock.wait(200) }
             }
         } finally {
-            viewers--
+            viewerCount.decrementAndGet()
         }
     }
 

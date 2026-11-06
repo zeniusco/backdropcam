@@ -362,10 +362,8 @@ class CompositeEngine(context: Context) {
             mirrorFront = mirrorFrontCamera
             refine = refineEdges
             val s = softness.coerceIn(0f, 1f)
-            // Centred a little above 0.5 so the faint band of wall around you is dropped.
-            val w = 0.04f + 0.30f * s
-            edgeLo = 0.55f - w
-            edgeHi = 0.55f + w
+            edgeLo = 0.5f - (0.04f + 0.36f * s)
+            edgeHi = 0.5f + (0.04f + 0.36f * s)
         }
     }
 
@@ -1316,7 +1314,6 @@ void main() {
                  * smoothstep(0.0, uFeather.x, 1.0 - p.y) * smoothstep(0.0, uFeather.y, p.y);
 
     float m = 1.0;
-    vec3 fg = cam; // person colour, cleaned of background light at the edges
     if (uHasMask > 0.5) {
         if (uRefine > 0.5) {
             // Edge refinement at full resolution:
@@ -1332,8 +1329,7 @@ void main() {
             float mw = 0.0;
             for (int i = -2; i <= 2; i++) {
                 for (int j = -2; j <= 2; j++) {
-                    // Wide enough to see both the hair and the wall behind it.
-                    vec2 w = p + vec2(float(i), float(j)) * uMaskTexel * 1.4;
+                    vec2 w = p + vec2(float(i), float(j)) * uMaskTexel * 0.9;
                     vec3 c = camAt(w);
                     float mk = maskAt(w);
                     vec3 d = c - cam;
@@ -1352,12 +1348,8 @@ void main() {
             vec3 fb = F - B;
             float len2 = dot(fb, fb);
             float aCol = clamp(dot(cam - B, fb) / max(len2, 0.0001), 0.0, 1.0);
-            float conf = step(0.5, wf) * step(0.5, wb) * smoothstep(0.006, 0.04, len2);
-            m = mix(mBil, aCol, conf);
-            // Colour decontamination: an edge pixel is a mix of you (F) and the wall (B).
-            // Remove the wall's share so hair edges do not glow with the old background.
-            vec3 est = clamp(B + (cam - B) / max(aCol, 0.25), 0.0, 1.0);
-            fg = mix(cam, est, conf);
+            float conf = step(0.5, wf) * step(0.5, wb) * smoothstep(0.01, 0.05, len2);
+            m = mix(mBil, aCol, conf * 0.85);
         } else {
             m = maskAt(p);
         }
@@ -1395,9 +1387,9 @@ void main() {
     }
     vec3 c;
     if (uLogoBehind > 0.5) {
-        c = mix(withLogo(bg), adjust(fg), m);   // logo on the wall, behind you
+        c = mix(withLogo(bg), adjust(cam), m);   // logo on the wall, behind you
     } else {
-        c = withLogo(mix(bg, adjust(fg), m));   // logo on top, like a TV logo
+        c = withLogo(mix(bg, adjust(cam), m));   // logo on top, like a TV logo
     }
     outColor = vec4(withOverlay(c), 1.0);
 }
