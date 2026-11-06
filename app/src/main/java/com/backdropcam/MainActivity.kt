@@ -1613,9 +1613,7 @@ class MainActivity : AppCompatActivity() {
         b.details.text = details ?: "Movies/BackdropCam"
         b.thumb.roundCorners(dp(16))
         loadThumbInto(uri, b.thumb)
-        b.playBtn.setOnClickListener {
-            startActivitySafe(Intent(Intent.ACTION_VIEW).setDataAndType(uri, "video/mp4").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
-        }
+        b.playBtn.setOnClickListener { playVideo(uri) }
         b.shareVideoBtn.setOnClickListener {
             startActivitySafe(
                 Intent.createChooser(
@@ -1637,6 +1635,54 @@ class MainActivity : AppCompatActivity() {
         b.shareLinkBtn.setOnClickListener { lastLink?.let { shareText(it) } }
         dlg.setOnDismissListener { if (resultUi === b) resultUi = null }
         refreshResultUi()
+        dlg.show()
+    }
+
+    /**
+     * Plays a recording inside the app, so it works on every phone whatever gallery app is
+     * installed. "Open in…" still hands it to another app.
+     */
+    private fun playVideo(uri: Uri) {
+        val dlg = android.app.Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
+        val root = FrameLayout(this).apply { setBackgroundColor(0xFF000000.toInt()) }
+        val video = android.widget.VideoView(this)
+        root.addView(video, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER
+        ))
+        val controls = android.widget.MediaController(this)
+        controls.setAnchorView(video)
+        video.setMediaController(controls)
+        fun topButton(label: String, gravity: Int, onClick: () -> Unit) = TextView(this).apply {
+            text = label
+            textSize = 15f
+            setTextColor(0xFFFFFFFF.toInt())
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setPadding(dp(18), dp(12), dp(18), dp(12))
+            background = ContextCompat.getDrawable(context, R.drawable.bg_pill_dark)
+            setOnClickListener { onClick() }
+            root.addView(this, FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, gravity
+            ).apply { setMargins(dp(16), dp(40), dp(16), 0) })
+        }
+        topButton("Close", Gravity.TOP or Gravity.START) { dlg.dismiss() }
+        topButton("Open in…", Gravity.TOP or Gravity.END) {
+            startActivitySafe(
+                Intent.createChooser(
+                    Intent(Intent.ACTION_VIEW).setDataAndType(uri, "video/*").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
+                    "Open with"
+                )
+            )
+        }
+        video.setOnPreparedListener { controls.show(3000); video.start() }
+        video.setOnCompletionListener { controls.show(0) }
+        video.setOnErrorListener { _, _, _ ->
+            hint("This phone could not play the video here. Try Open in…")
+            true
+        }
+        root.setOnClickListener { if (controls.isShowing) controls.hide() else controls.show(3000) }
+        video.setVideoURI(uri)
+        dlg.setContentView(root)
+        dlg.setOnDismissListener { video.stopPlayback() }
         dlg.show()
     }
 
