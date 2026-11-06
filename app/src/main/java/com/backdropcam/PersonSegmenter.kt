@@ -118,7 +118,9 @@ class PersonSegmenter(context: Context, highQuality: Boolean, allowGpu: Boolean 
                 // (the flicker around your outline): hold it steady. Where the picture changed,
                 // you moved: follow the new mask at once, so nothing trails behind you.
                 val moved = abs(luma[i] - pl[i])
-                val a = SMOOTHING * (1f - ((moved - 0.04f) / 0.12f).coerceIn(0f, 1f))
+                var a = SMOOTHING * (1f - ((moved - 0.04f) / 0.12f).coerceIn(0f, 1f))
+                // A big jump in the mask is real (a hand moved in or out): never hold it back.
+                a *= 1f - ((abs(v - p[i]) - 0.2f) / 0.2f).coerceIn(0f, 1f)
                 v = a * p[i] + (1f - a) * v
             }
             cur[i] = v

@@ -1552,15 +1552,21 @@ void main() {
         // model and camera noise cannot make it flicker; where you moved it follows at once.
         vec3 cam = camAt(vW);
         float a = uHasMask > 0.5 ? rawAlpha(vW, cam) : 1.0;
-        vec3 soft = textureLod(uFrame, (uNFromW * vec4(vW, 0.0, 1.0)).xy, 2.0).rgb;
+        vec3 soft = textureLod(uFrame, (uNFromW * vec4(vW, 0.0, 1.0)).xy, 1.0).rgb;
         float luma = dot(soft, vec3(0.299, 0.587, 0.114));
+        // Colour balance too, so a hand moving over a wall of similar brightness still counts
+        // as movement.
+        float chroma = (soft.r - soft.b) * 0.5 + 0.5;
         if (uHasPrev > 0.5) {
             vec4 prev = texture(uAlphaPrev, vW);
-            float moved = abs(luma - prev.g);
-            float k = 0.8 * (1.0 - smoothstep(0.025, 0.09, moved));
+            float moved = max(abs(luma - prev.g), abs(chroma - prev.b));
+            float k = 0.7 * (1.0 - smoothstep(0.012, 0.04, moved));
+            // Only small wobbles are steadied. A big change (your hand has left this spot, or
+            // just arrived) is taken at once, so no ghost of you or of the room is left behind.
+            k *= 1.0 - smoothstep(0.15, 0.35, abs(a - prev.r));
             a = mix(a, prev.r, k);
         }
-        outColor = vec4(a, luma, 0.0, 1.0);
+        outColor = vec4(a, luma, chroma, 1.0);
         return;
     }
     if (uMode > 2.5) {

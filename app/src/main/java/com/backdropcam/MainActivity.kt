@@ -1705,7 +1705,8 @@ class MainActivity : AppCompatActivity() {
                 )
             )
         }
-        video.setOnPreparedListener { controls.show(3000); video.start() }
+        // Start first, then show the controls, so the button shows Pause from the first moment.
+        video.setOnPreparedListener { video.start(); controls.show(3000) }
         video.setOnCompletionListener { controls.show(0) }
         video.setOnErrorListener { _, _, _ ->
             hint("This phone could not play the video here. Try Open in…")
@@ -1716,9 +1717,14 @@ class MainActivity : AppCompatActivity() {
         dlg.setContentView(root)
         dlg.setOnDismissListener {
             video.stopPlayback()
+            // Back to the camera, which is laid out for portrait (it turns its own picture).
+            requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
             pauseCameraForPlayback(false)
         }
         pauseCameraForPlayback(true)
+        // While watching, the screen turns with the phone (if auto-rotate is on), so landscape
+        // videos fill the screen.
+        requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_FULL_USER
         dlg.show()
     }
 
