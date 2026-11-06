@@ -558,6 +558,7 @@ class CompositeEngine(context: Context) {
      * mirrored the camera image. This differs between phones, so we detect instead of assuming.
      */
     private var geometrySig = -1
+    private var sigChangeFrames = 0
 
     /** Which way the camera transform turns and mirrors the picture, as a small number. */
     private fun geometrySignature(): Int {
@@ -610,7 +611,11 @@ class CompositeEngine(context: Context) {
         // real one arrives a moment later. Re-check every frame and redo the geometry when the
         // rotation or mirroring changes, so the picture never stays sideways.
         val sig = geometrySignature()
-        if (!geometryReady || sig != geometrySig) {
+        // A changed transform must last a few frames before it counts, so a single odd frame
+        // can never make the picture (and the cut-out) restart over and over.
+        sigChangeFrames = if (geometryReady && sig != geometrySig) sigChangeFrames + 1 else 0
+        if (!geometryReady || sigChangeFrames >= 3) {
+            sigChangeFrames = 0
             if (geometryReady) {
                 presentPendingUpTo(Long.MAX_VALUE)
                 invalidateMask()
@@ -1337,8 +1342,22 @@ void main() {
                  * smoothstep(0.0, uFeather.x, 1.0 - p.y) * smoothstep(0.0, uFeather.y, p.y);
 
     float m = 1.0;
+    // Is this pixel near the edge of the person? Five cheap taps decide. Far inside you or far
+    // out in the background the expensive edge refinement below would not change anything, so
+    // it only runs in the thin band around your outline (most of the picture skips it).
+    bool nearEdge = false;
+    float m0 = 1.0;
     if (uHasMask > 0.5) {
-        if (uRefine > 0.5) {
+        m0 = maskAt(p);
+        vec2 r = uMaskTexel * 1.8;
+        float lo = min(m0, min(min(maskAt(p + vec2(r.x, r.y)), maskAt(p - vec2(r.x, r.y))),
+                               min(maskAt(p + vec2(r.x, -r.y)), maskAt(p - vec2(r.x, -r.y)))));
+        float hi = max(m0, max(max(maskAt(p + vec2(r.x, r.y)), maskAt(p - vec2(r.x, r.y))),
+                               max(maskAt(p + vec2(r.x, -r.y)), maskAt(p - vec2(r.x, -r.y)))));
+        nearEdge = lo < 0.97 && hi > 0.03;
+    }
+    if (uHasMask > 0.5) {
+        if (uRefine > 0.5 && nearEdge) {
             // Edge refinement at full resolution:
             // 1) joint bilateral: the coarse mask follows colour edges;
             // 2) colour-line matting: near an edge, estimate the local person colour F and
@@ -1374,13 +1393,15 @@ void main() {
             float conf = step(0.5, wf) * step(0.5, wb) * smoothstep(0.01, 0.05, len2);
             m = mix(mBil, aCol, conf * 0.85);
         } else {
-            m = maskAt(p);
+            m = m0;
         }
     }
     m = smoothstep(uEdge.x, uEdge.y, m) * inside;
 
-    vec3 bg;
-    if (uMode < 1.5) {
+    vec3 bg = vec3(0.0);
+    if (m > 0.998) {
+        // Fully covered by you: the background is not visible here, skip it.
+    } else if (uMode < 1.5) {
         // Blur only the background: taps on the person are left out, so dark hair or clothes
         // are not smeared into the blurred room as a shadow around you.
         vec2 t = img(vW);

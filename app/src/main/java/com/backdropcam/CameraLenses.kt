@@ -80,7 +80,11 @@ object CameraLenses {
                 else AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY
             )
             .setResolutionFilter { sizes, _ ->
-                val withinCap = sizes.filter { max(it.width, it.height) <= cap }.sortedByDescending { it.width * it.height }
+                // Never more pixels than 4K 16:9 (8.3 MP): 4:3 at 3840 wide would be 11 MP, which
+                // makes the cut-out lag badly. 4:3 then tops out around 3264 x 2448.
+                val maxPixels = cap.toLong() * cap * 9 / 16
+                val withinCap = sizes.filter { max(it.width, it.height) <= cap && it.width.toLong() * it.height <= maxPixels }
+                    .sortedByDescending { it.width * it.height }
                 val good = withinCap.filter {
                     val r = max(it.width, it.height).toFloat() / minOf(it.width, it.height)
                     abs(r - ratio) < 0.02f && VideoRecorder.isSizeSupported(it.width, it.height)
