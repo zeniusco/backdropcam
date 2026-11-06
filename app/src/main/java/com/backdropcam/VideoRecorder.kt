@@ -45,6 +45,10 @@ class VideoRecorder(
     private val muted: () -> Boolean,
     private val onLevel: (Float) -> Unit,
     private val onPcm: ((ShortArray, Int, Long) -> Unit)? = null,
+    /** Background music mixed under the voice (closed when the recording finishes). */
+    private val music: MusicSource? = null,
+    private val musicVolume: () -> Float = { 0f },
+    private val musicDuck: () -> Boolean = { true },
     private val fps: Int = 30,
 ) {
     @Volatile var paused = false
@@ -154,11 +158,15 @@ class VideoRecorder(
     }
 
     /** Call after the GL engine detached the encoder surface. Returns the gallery URI. */
+    private val ducker = MusicSource.Companion.Ducker(SAMPLE_RATE)
+    private val musicGain = FloatArray(2048)
+
     fun finish(): Uri {
         videoCodec.signalEndOfInputStream()
         audioRunning = false
         videoThread?.join(5000)
         audioThread?.join(5000)
+        music?.close()
         runCatching { videoCodec.stop() }
         videoCodec.release()
         audioCodec?.run { runCatching { stop() }; release() }
@@ -259,6 +267,10 @@ class VideoRecorder(
                                 audioSamples += n
                                 onPcm?.invoke(pcm, n, ptsUs) // raw audio, before gain and mute
                                 val level = AudioLevel.process(pcm, n, gain(), muted())
+                                if (music != null) {
+                                    ducker.gains(pcm, n, musicVolume(), musicDuck(), 0.25f, musicGain)
+                                    music.mixInto(pcm, n, musicGain)
+                                }
                                 val now = System.currentTimeMillis()
                                 if (now - lastLevelMs > 60) {
                                     lastLevelMs = now

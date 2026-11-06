@@ -125,6 +125,25 @@ class AppSettings(context: Context) {
 
     fun setLogoPlacement(backdrop: String, v: LogoPlacement) = p.edit().putString("logo_$backdrop", v.toString()).apply()
 
+    // ---------------------------------------------------------------- music
+
+    var musicOn: Boolean
+        get() = p.getBoolean("musicOn", false)
+        set(v) = p.edit().putBoolean("musicOn", v).apply()
+
+    /** 0..1 */
+    var musicVolume: Float
+        get() = p.getFloat("musicVolume", 0.3f)
+        set(v) = p.edit().putFloat("musicVolume", v).apply()
+
+    var musicDuck: Boolean
+        get() = p.getBoolean("musicDuck", true)
+        set(v) = p.edit().putBoolean("musicDuck", v).apply()
+
+    var musicName: String
+        get() = p.getString("musicName", "")!!
+        set(v) = p.edit().putString("musicName", v).apply()
+
     // ---------------------------------------------------------------- brand kit
 
     var brandName: String

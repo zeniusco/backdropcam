@@ -193,6 +193,32 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+    private val musicFile by lazy { File(filesDir, "music") }
+    private var refreshMusicUi: (() -> Unit)? = null
+
+    private val pickMusic =
+        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            if (uri != null) io.execute {
+                try {
+                    val size = contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length } ?: -1L
+                    if (size > 80L * 1024 * 1024) error("file is over 80 MB")
+                    var name = "Music"
+                    contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                        if (c.moveToFirst()) name = c.getString(0) ?: name
+                    }
+                    contentResolver.openInputStream(uri)!!.use { input -> musicFile.outputStream().use { input.copyTo(it) } }
+                    main.post {
+                        settings.musicName = name
+                        settings.musicOn = true
+                        refreshMusicUi?.invoke()
+                        hint("Music added: $name")
+                    }
+                } catch (e: Exception) {
+                    main.post { hint("Could not use that music: ${e.message}") }
+                }
+            }
+        }
+
     private val importScript =
         registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             if (uri != null) io.execute {
@@ -1091,6 +1117,9 @@ class MainActivity : AppCompatActivity() {
                 onLevel = { level -> main.post { ui.levelBar.progress = (level * 100).toInt() } },
                 // In hands-free mode the recording's own sound is checked for "stop".
                 onPcm = if (listenForStop) { pcm: ShortArray, n: Int, t: Long -> voice.feed48k(pcm, n, t) } else null,
+                music = if (audio && settings.musicOn && musicFile.exists()) MusicSource(musicFile) else null,
+                musicVolume = { settings.musicVolume },
+                musicDuck = { settings.musicDuck },
             )
             rec.start()
             engine.startRecording(rec.inputSurface, size.width, size.height, rotation, { rec.ptsNs() }, { rec.paused })
@@ -1336,6 +1365,32 @@ class MainActivity : AppCompatActivity() {
 
         b.autoUploadSwitch.isChecked = settings.autoUpload
         b.autoUploadSwitch.setOnCheckedChangeListener { _, on -> settings.autoUpload = on }
+
+        // Music
+        val refreshMusic = {
+            val has = musicFile.exists()
+            b.musicName.text = if (has) settings.musicName.ifBlank { "Music" } else "No music chosen"
+            b.musicRemoveBtn.isEnabled = has
+            b.musicSwitch.isEnabled = has
+            b.musicSwitch.isChecked = has && settings.musicOn
+        }
+        refreshMusicUi = refreshMusic
+        dlg.setOnDismissListener { if (refreshMusicUi === refreshMusic) refreshMusicUi = null }
+        refreshMusic()
+        b.musicPickBtn.setOnClickListener { pickMusic.launch(arrayOf("audio/*")) }
+        b.musicRemoveBtn.setOnClickListener {
+            musicFile.delete()
+            settings.musicOn = false
+            refreshMusic()
+        }
+        b.musicSwitch.setOnCheckedChangeListener { _, on ->
+            settings.musicOn = on
+            if (on && !settings.micOn) hint("Music needs \"Record sound\" on (mic button)")
+        }
+        b.musicVolume.value = (settings.musicVolume * 100f).coerceIn(0f, 100f)
+        b.musicVolume.addOnChangeListener { _, v, _ -> settings.musicVolume = v / 100f }
+        b.musicDuckSwitch.isChecked = settings.musicDuck
+        b.musicDuckSwitch.setOnCheckedChangeListener { _, on -> settings.musicDuck = on }
 
         // Brand
         b.brandName.setText(settings.brandName)

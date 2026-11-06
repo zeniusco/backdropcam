@@ -78,6 +78,63 @@
             android:valueFrom="0"
             android:valueTo="1" />
 
+        <!-- Music -->
+        <TextView style="@style/SheetSection" android:text="Background music" />
+
+        <TextView
+            android:id="@+id/musicName"
+            style="@style/SheetLabel"
+            android:text="No music chosen" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:orientation="horizontal">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/musicPickBtn"
+                style="@style/Widget.Material3.Button.TonalButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Choose music" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/musicRemoveBtn"
+                style="@style/Widget.Material3.Button.TextButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="Remove" />
+        </LinearLayout>
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/musicSwitch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="Add the music to recordings" />
+
+        <TextView style="@style/SheetLabel" android:text="Music volume" />
+
+        <com.google.android.material.slider.Slider
+            android:id="@+id/musicVolume"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:valueFrom="0"
+            android:valueTo="100" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/musicDuckSwitch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Make the music quieter while I speak" />
+
+        <TextView
+            style="@style/SheetLabel"
+            android:text="The music is mixed straight into the video, so you won't hear it while recording. It loops if your video is longer than the song." />
+
         <!-- Brand -->
         <TextView style="@style/SheetSection" android:text="Brand" />
 
