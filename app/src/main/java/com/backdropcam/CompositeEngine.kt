@@ -785,7 +785,7 @@ class CompositeEngine(context: Context) {
     private fun submitSegmentation(slot: Slot): Boolean {
         val (ww, wh) = worldSize()
         val full = fullRoi(ww, wh)
-        val crop = if (lightMode) null else nextRoi
+        val crop = nextRoi
         val isCrop = crop != null
         val roi = crop ?: full
         val changed = if (isCrop) lastRoi?.contentEquals(roi) != true else lastFullRoi?.contentEquals(roi) != true
@@ -831,7 +831,7 @@ class CompositeEngine(context: Context) {
                     mask = segmenter?.segment(bmp, resetSmoothing = changed, stream = if (isCrop) 1 else 0)
                     noteSegmentationTime(SystemClock.uptimeMillis() - t0)
                     if (mask != null) {
-                        if (!lightMode) nextRoi = chooseNextRoi(mask, roi, ww, wh, !isCrop)
+                        nextRoi = chooseNextRoi(mask, roi, ww, wh, !isCrop)
                         if (!isCrop) reportFraming(mask, bmp, roi, mirroredView)
                     }
                 } catch (t: Throwable) {
@@ -1558,7 +1558,7 @@ vec2 img(vec2 w) { return vec2(w.x, 1.0 - w.y); }
 
 // Person probability at world point w: the detailed crop mask inside the crop, fading into
 // the whole-picture mask towards the crop's border, so the crop can never cut the person.
-float maskAt(vec2 w) {
+float maskRaw(vec2 w) {
     vec2 f = (w - uFullRect.xy) / (uFullRect.zw - uFullRect.xy);
     float full = texture(uMaskFull, vec2(f.x, 1.0 - f.y)).r;
     if (uHasRoi < 0.5) return full;
@@ -1570,6 +1570,16 @@ float maskAt(vec2 w) {
     if (edge <= 0.0) return full;
     float roi = texture(uMask, vec2(m.x, 1.0 - m.y)).r;
     return mix(full, roi, smoothstep(0.0, 0.08, edge));
+}
+
+// Near the edges of the camera picture the model is unsure (your body simply continues past the
+// edge), so the cut-out tends to fade out there and you look like you are floating. Wherever
+// you reach close to an edge, carry the cut-out straight out to that edge.
+float maskAt(vec2 w) {
+    float m = maskRaw(w);
+    vec2 inner = clamp(w, vec2(0.06), vec2(0.94));
+    if (inner != w) m = max(m, maskRaw(inner));
+    return m;
 }
 
 vec3 adjust(vec3 c) {
