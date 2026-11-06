@@ -599,6 +599,38 @@ class CompositeEngine(context: Context) {
     // ================================================================== per camera frame
 
     private fun onCameraFrame() {
+        val t0 = SystemClock.uptimeMillis()
+        try {
+            handleCameraFrame()
+        } finally {
+            noteGlBusy(SystemClock.uptimeMillis() - t0)
+        }
+    }
+
+    // How much of the time the drawing thread is busy. On phones with a slow graphics chip it
+    // is the drawing (not the cut-out model) that falls behind, so both are watched.
+    private var glBusyMs = 0L
+    private var glWindowStart = 0L
+    private var glSlowWindows = 0
+
+    private fun noteGlBusy(ms: Long) {
+        val now = SystemClock.uptimeMillis()
+        if (glWindowStart == 0L) glWindowStart = now
+        glBusyMs += ms
+        val span = now - glWindowStart
+        if (span < 3000) return
+        val busy = glBusyMs.toFloat() / span
+        glBusyMs = 0
+        glWindowStart = now
+        glSlowWindows = if (busy > 0.8f) glSlowWindows + 1 else 0
+        if (glSlowWindows >= 2 && !slowReported) {
+            slowReported = true
+            glSlowWindows = 0
+            ContextCompat.getMainExecutor(appContext).execute { onTooSlow?.invoke() }
+        }
+    }
+
+    private fun handleCameraFrame() {
         val st = cameraTexture ?: return
         makeCurrentAny()
         try {
@@ -714,8 +746,10 @@ class CompositeEngine(context: Context) {
                     segBusy.set(false)
                     val m = mask
                     handler.post {
+                        val t0 = SystemClock.uptimeMillis()
                         if (m != null && gen == maskGen) uploadMask(m, roi, whole)
                         presentPendingUpTo(id) // this frame (and any skipped before it) can now be shown
+                        noteGlBusy(SystemClock.uptimeMillis() - t0)
                     }
                 }
             }
@@ -731,7 +765,7 @@ class CompositeEngine(context: Context) {
     var onTooSlow: (() -> Unit)? = null
     private var segTimeAvg = 0f
     private var segSamples = 0
-    private var slowReported = false
+    @Volatile private var slowReported = false
 
     /** Runs on the segmentation thread. */
     private fun noteSegmentationTime(ms: Long) {
@@ -746,6 +780,7 @@ class CompositeEngine(context: Context) {
     /** Start measuring speed afresh (after the settings changed). */
     fun resetSpeedCheck() {
         segExecutor.execute { segSamples = 0; segTimeAvg = 0f; slowReported = false }
+        handler.post { glBusyMs = 0; glWindowStart = 0; glSlowWindows = 0 }
     }
 
     /** A square crop (in pixels) covering the whole picture, letterboxed. */

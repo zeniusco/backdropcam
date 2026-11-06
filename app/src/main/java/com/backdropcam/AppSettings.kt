@@ -66,6 +66,10 @@ class AppSettings(context: Context) {
         get() = p.getBoolean("slowPhoneHandled", false)
         set(v) = p.edit().putBoolean("slowPhoneHandled", v).apply()
 
+    var slow720Handled: Boolean
+        get() = p.getBoolean("slow720Handled", false)
+        set(v) = p.edit().putBoolean("slow720Handled", v).apply()
+
     var slowModelHandled: Boolean
         get() = p.getBoolean("slowModelHandled", false)
         set(v) = p.edit().putBoolean("slowModelHandled", v).apply()

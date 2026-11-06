@@ -347,6 +347,14 @@ class MainActivity : AppCompatActivity() {
                 bindCamera()
                 hint("Switched to 1080p so this phone keeps up. Tap the quality chip to change it.")
             }
+            settings.quality != "720" && !settings.slow720Handled -> {
+                settings.slow720Handled = true
+                settings.slowPhoneHandled = true
+                settings.quality = "720"
+                engine.resetSpeedCheck()
+                bindCamera()
+                hint("Switched to 720p so this phone keeps up. Tap the quality chip to change it.")
+            }
         }
     }
 
