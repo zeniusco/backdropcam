@@ -63,6 +63,7 @@ import androidx.core.widget.doAfterTextChanged
 import androidx.core.widget.TextViewCompat
 import com.backdropcam.databinding.ActivityMainBinding
 import com.backdropcam.databinding.DialogScriptBinding
+import com.backdropcam.databinding.DialogTrimBinding
 import com.backdropcam.databinding.SheetMicBinding
 import com.backdropcam.databinding.SheetResultBinding
 import com.backdropcam.databinding.SheetScriptsBinding
@@ -1379,11 +1380,97 @@ class MainActivity : AppCompatActivity() {
             )
         }
         b.uploadBtn.setOnClickListener { startUpload() }
+        b.trimBtn.setOnClickListener { showTrimDialog(uri, dlg) }
+        b.retakeBtn.setOnClickListener {
+            dlg.dismiss()
+            deleteVideo(uri)
+            hint("Deleted. Recording again")
+            onRecordPressed()
+        }
         b.copyLinkBtn.setOnClickListener { lastLink?.let { copyLink(it) } }
         b.shareLinkBtn.setOnClickListener { lastLink?.let { shareText(it) } }
         dlg.setOnDismissListener { if (resultUi === b) resultUi = null }
         refreshResultUi()
         dlg.show()
+    }
+
+    /** Removes a recording this app made (no permission prompt needed for our own files). */
+    private fun deleteVideo(uri: Uri) {
+        io.execute { runCatching { contentResolver.delete(uri, null, null) } }
+        if (lastVideo == uri) {
+            lastVideo = null
+            lastLink = null
+            settings.lastVideo = null
+            ui.lastThumb.setImageDrawable(null)
+        }
+    }
+
+    private fun showTrimDialog(uri: Uri, resultDialog: BottomSheetDialog) {
+        val b = DialogTrimBinding.inflate(layoutInflater)
+        io.execute {
+            val durUs = Trimmer.durationUs(this, uri)
+            main.post {
+                if (durUs < 1_500_000L) return@post hint("This video is too short to trim")
+                val total = durUs / 1_000_000f
+                b.trimRange.valueFrom = 0f
+                b.trimRange.valueTo = total
+                b.trimRange.stepSize = 0f
+                b.trimRange.values = listOf(0f, total)
+                fun fmt(sec: Float) = String.format("%d:%04.1f", (sec / 60).toInt(), sec % 60)
+                fun label() {
+                    val (a, z) = b.trimRange.values
+                    b.trimLabel.text = "${fmt(a)}  to  ${fmt(z)}   (${fmt(z - a)})"
+                }
+                var frameJob = 0
+                fun showFrame(sec: Float) {
+                    val job = ++frameJob
+                    io.execute {
+                        val f = runCatching {
+                            MediaMetadataRetriever().run {
+                                setDataSource(this@MainActivity, uri)
+                                getFrameAtTime((sec * 1_000_000).toLong(), MediaMetadataRetriever.OPTION_CLOSEST_SYNC).also { release() }
+                            }
+                        }.getOrNull()
+                        main.post { if (job == frameJob && f != null) b.trimFrame.setImageBitmap(f) }
+                    }
+                }
+                var lastA = 0f
+                b.trimRange.addOnChangeListener { slider, _, _ ->
+                    label()
+                    val (a, z) = slider.values
+                    showFrame(if (a != lastA) a else z)
+                    lastA = a
+                }
+                label()
+                showFrame(0f)
+                MaterialAlertDialogBuilder(this)
+                    .setTitle("Trim video")
+                    .setView(b.root)
+                    .setPositiveButton("Save") { _, _ ->
+                        val (a, z) = b.trimRange.values
+                        hint("Trimming…")
+                        io.execute {
+                            try {
+                                val out = Trimmer.trim(this, uri, (a * 1_000_000).toLong(), (z * 1_000_000).toLong())
+                                runCatching { contentResolver.delete(uri, null, null) }
+                                main.post {
+                                    resultDialog.dismiss()
+                                    lastVideo = out
+                                    lastLink = null
+                                    uploadMessage = null
+                                    settings.lastVideo = out.toString()
+                                    loadThumbInto(out, ui.lastThumb)
+                                    showResultSheet(out, "Trimmed · Movies/BackdropCam")
+                                }
+                            } catch (e: Exception) {
+                                main.post { hint("Could not trim: ${e.message}") }
+                            }
+                        }
+                    }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+            }
+        }
     }
 
     private fun refreshResultUi() {
