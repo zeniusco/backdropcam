@@ -250,10 +250,14 @@ class MainActivity : AppCompatActivity() {
 
     private val authLauncher =
         registerForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
-            val token = runCatching {
+            val outcome = runCatching {
                 Identity.getAuthorizationClient(this).getAuthorizationResultFromIntent(result.data).accessToken
-            }.getOrNull()
-            if (token != null) upload(token) else uploadFinished(null, "Upload cancelled")
+            }
+            val token = outcome.getOrNull()
+            when {
+                token != null -> upload(token)
+                else -> driveSetupProblem(outcome.exceptionOrNull())
+            }
         }
 
     // ================================================================== lifecycle
@@ -1748,7 +1752,47 @@ class MainActivity : AppCompatActivity() {
                     result.accessToken?.let { upload(it) } ?: uploadFinished(null, "Google sign-in failed")
                 }
             }
-            .addOnFailureListener { uploadFinished(null, "Google sign-in failed: ${it.message}") }
+            .addOnFailureListener { driveSetupProblem(it) }
+    }
+
+    /**
+     * Google refused the sign-in. Almost always this means the app is not yet registered with
+     * Google for Drive access (an OAuth client for this app's package and signing key).
+     */
+    private fun driveSetupProblem(e: Throwable?) {
+        val code = (e as? com.google.android.gms.common.api.ApiException)?.statusCode
+        val why = when (code) {
+            10 -> "Google does not recognise this app yet (code 10: no matching OAuth client for this app's signing key)."
+            12501, 16 -> "The sign-in was closed before it finished."
+            7 -> "No internet connection."
+            null -> "Google closed the sign-in without giving access."
+            else -> "Google refused the sign-in (code $code)."
+        }
+        uploadFinished(null, "Could not connect to Google Drive. $why")
+        if (code == 12501 || code == 16 || code == 7) return
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Google Drive is not set up for this app yet")
+            .setMessage(
+                "$why\n\nUploading from inside BackdropCam needs a one-time registration of the app " +
+                    "with Google (Google Cloud Console). Until then, you can save the video with the " +
+                    "Google Drive app instead and copy its link there."
+            )
+            .setPositiveButton("Save with Drive app") { _, _ -> lastVideo?.let { saveWithDriveApp(it) } }
+            .setNegativeButton("Close", null)
+            .show()
+    }
+
+    /** Hands the video to the Google Drive app ("Save to Drive"); no setup needed. */
+    private fun saveWithDriveApp(uri: Uri) {
+        val send = Intent(Intent.ACTION_SEND).setType("video/mp4").putExtra(Intent.EXTRA_STREAM, uri)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        val drive = Intent(send).setPackage("com.google.android.apps.docs")
+        try {
+            startActivity(drive)
+            hint("In Drive, tap Save. Then open the file there, tap Share, and copy the link.")
+        } catch (e: Exception) {
+            startActivitySafe(Intent.createChooser(send, "Save to Drive"))
+        }
     }
 
     private fun upload(token: String) {
