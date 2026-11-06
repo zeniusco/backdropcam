@@ -51,9 +51,9 @@ class ScriptStore(private val context: Context) {
         val body = if (isDocx) {
             resolver.openInputStream(uri)!!.use { readDocx(ZipInputStream(it)) }
         } else {
-            resolver.openInputStream(uri)!!.use { it.readBytes().toString(Charsets.UTF_8) }
+            resolver.openInputStream(uri)!!.use { readLimited(it, MAX_FILE_BYTES).toString(Charsets.UTF_8) }
         }
-        return title to body.trim()
+        return title.take(120) to body.trim().take(MainActivity.MAX_SCRIPT_CHARS)
     }
 
     /** Pulls plain text out of a Word document: one line per paragraph. */
@@ -61,7 +61,8 @@ class ScriptStore(private val context: Context) {
         while (true) {
             val entry = zip.nextEntry ?: break
             if (entry.name == "word/document.xml") {
-                val xml = zip.readBytes().toString(Charsets.UTF_8)
+                // Read at most a fixed amount, so a damaged or hostile file cannot fill the memory.
+                val xml = readLimited(zip, MAX_FILE_BYTES).toString(Charsets.UTF_8)
                 val sb = StringBuilder()
                 for (para in Regex("<w:p[ >].*?</w:p>", RegexOption.DOT_MATCHES_ALL).findAll(xml)) {
                     val p = para.value
@@ -78,6 +79,23 @@ class ScriptStore(private val context: Context) {
             }
         }
         error("Not a Word document")
+    }
+
+    /** Reads up to [max] bytes; bigger files are refused. */
+    private fun readLimited(input: java.io.InputStream, max: Int): ByteArray {
+        val out = java.io.ByteArrayOutputStream()
+        val buf = ByteArray(16 * 1024)
+        while (true) {
+            val n = input.read(buf)
+            if (n < 0) break
+            out.write(buf, 0, n)
+            if (out.size() > max) error("File is too large")
+        }
+        return out.toByteArray()
+    }
+
+    private companion object {
+        const val MAX_FILE_BYTES = 8 * 1024 * 1024
     }
 
     private fun unescape(s: String) = s

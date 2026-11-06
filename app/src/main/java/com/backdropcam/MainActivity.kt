@@ -341,17 +341,21 @@ class MainActivity : AppCompatActivity() {
         if (Build.VERSION.SDK_INT < 29) return
         val pm = getSystemService(PowerManager::class.java) ?: return
         var warned = false
-        runCatching {
-            pm.addThermalStatusListener(ContextCompat.getMainExecutor(this)) { status ->
-                if (status >= PowerManager.THERMAL_STATUS_SEVERE && !warned) {
-                    warned = true
-                    hint("The phone is getting hot. Let it cool down, or record in 1080p to ease the load.")
-                } else if (status <= PowerManager.THERMAL_STATUS_LIGHT) {
-                    warned = false
-                }
+        val listener = PowerManager.OnThermalStatusChangedListener { status ->
+            if (status >= PowerManager.THERMAL_STATUS_SEVERE && !warned) {
+                warned = true
+                hint("The phone is getting hot. Let it cool down, or record in 1080p to ease the load.")
+            } else if (status <= PowerManager.THERMAL_STATUS_LIGHT) {
+                warned = false
             }
         }
+        if (runCatching { pm.addThermalStatusListener(ContextCompat.getMainExecutor(this), listener) }.isSuccess) {
+            thermalListener = listener
+        }
     }
+
+    /** Kept so it can be removed again when the screen closes (otherwise it leaks the screen). */
+    private var thermalListener: Any? = null
 
     /** Free space on the storage where videos are saved, in MB (-1 if unknown). */
     private fun freeSpaceMb(): Long = runCatching {
@@ -363,7 +367,7 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         settings.sessionOpen = true
         foreground = true
-        engine.setBackdropVideoPlaying(true)
+        if (playbackPauses == 0) engine.setBackdropVideoPlaying(true)
         if (orientationListener.canDetectOrientation()) orientationListener.enable()
         (getSystemService(SENSOR_SERVICE) as? SensorManager)?.let { sm ->
             sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)?.let { sm.registerListener(tiltListener, it, SensorManager.SENSOR_DELAY_UI) }
@@ -387,6 +391,9 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         teleRunning = false
         remote?.stop()
+        if (Build.VERSION.SDK_INT >= 29) (thermalListener as? PowerManager.OnThermalStatusChangedListener)?.let { l ->
+            runCatching { getSystemService(PowerManager::class.java)?.removeThermalStatusListener(l) }
+        }
         engine.release()
         // The executors are left running: a save or upload that is still in flight finishes on
         // its own, and its result is dropped because the activity is gone.
@@ -1903,8 +1910,9 @@ class MainActivity : AppCompatActivity() {
     /** Text shared from Google Docs, Notes, WhatsApp… becomes a new teleprompter script. */
     private fun handleShareIntent(intent: Intent?) {
         if (intent?.action != Intent.ACTION_SEND) return
-        val text = intent.getStringExtra(Intent.EXTRA_TEXT) ?: return
-        val title = intent.getStringExtra(Intent.EXTRA_SUBJECT) ?: "Shared script"
+        // Text from other apps: keep it to a sensible size (a script, not a whole book).
+        val text = intent.getStringExtra(Intent.EXTRA_TEXT)?.take(MAX_SCRIPT_CHARS) ?: return
+        val title = (intent.getStringExtra(Intent.EXTRA_SUBJECT) ?: "Shared script").take(120)
         intent.action = null
         editScript(null, title, text)
     }
@@ -1933,6 +1941,9 @@ class MainActivity : AppCompatActivity() {
             },
             onCommand = { a ->
                 main.post {
+                    // Only while the camera screen is open: a remote must never start the camera
+                    // or a recording while the app is in the background, or during playback.
+                    if (!foreground || playbackPauses > 0 || isFinishing) return@post
                     when (a) {
                         "record" -> onRecordPressed()
                         "pause" -> togglePause()
@@ -2114,6 +2125,8 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_NONE = "none"
         private const val KEY_BLUR = "blur"
         private const val KEY_ADD = "add"
+        /** Longest teleprompter script accepted from a file or another app (about 60 pages). */
+        const val MAX_SCRIPT_CHARS = 200_000
         /** ISO x seconds above which the room counts as too dark (e.g. ISO 1600 at 1/40 s). */
         private const val DARK_EXPOSURE = 40f
     }

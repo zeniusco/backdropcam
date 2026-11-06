@@ -173,7 +173,7 @@ class CompositeEngine(context: Context) {
     @Volatile private var fullSegmenter: PersonSegmenter? = null
     private val segBusy = AtomicBoolean(false)
     private val readBuf: ByteBuffer = ByteBuffer.allocateDirect(ROI_SIZE * ROI_SIZE * 4).order(ByteOrder.nativeOrder())
-    private var maskGen = 0
+    @Volatile private var maskGen = 0
     // Two masks: one of the whole picture (always available, a little coarser) and one of the
     // crop around the person (detailed). The crop mask is used inside the crop and blends into
     // the whole-picture mask at its border, so a crop that is too tight can never cut you off.
@@ -801,11 +801,13 @@ class CompositeEngine(context: Context) {
             val dBmp = detectBitmap ?: Bitmap.createBitmap(ROI_SIZE, ROI_SIZE, Bitmap.Config.ARGB_8888).also { detectBitmap = it }
             readCrop(slot, full, dBmp)
             val mirroredView = isFront && mirrorFront
+            val gen0 = maskGen
             try {
                 detectExecutor.execute {
                     try {
                         val m = fullSegmenter?.segment(dBmp, resetSmoothing = true, stream = 0)
-                        if (m != null) {
+                        // Ignore results from before a rotation or camera switch.
+                        if (m != null && gen0 == maskGen) {
                             nextRoi = chooseNextRoi(m, full, ww, wh, true)
                             reportFraming(m, dBmp, full, mirroredView)
                         }
@@ -830,7 +832,7 @@ class CompositeEngine(context: Context) {
                     val t0 = SystemClock.uptimeMillis()
                     mask = segmenter?.segment(bmp, resetSmoothing = changed, stream = if (isCrop) 1 else 0)
                     noteSegmentationTime(SystemClock.uptimeMillis() - t0)
-                    if (mask != null) {
+                    if (mask != null && gen == maskGen) {
                         nextRoi = chooseNextRoi(mask, roi, ww, wh, !isCrop)
                         if (!isCrop) reportFraming(mask, bmp, roi, mirroredView)
                     }

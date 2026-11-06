@@ -29,7 +29,8 @@ class DriveUploader(private val resolver: ContentResolver, private val accessTok
 
     /** @return the shareable web link, e.g. https://drive.google.com/file/d/ID/view */
     fun uploadAndShare(uri: Uri, onProgress: (Int) -> Unit): String {
-        val size = resolver.openAssetFileDescriptor(uri, "r")!!.use { it.length }
+        val size = resolver.openAssetFileDescriptor(uri, "r")?.use { it.length } ?: -1L
+        if (size <= 0) throw IOException("Cannot read the video's size")
         val name = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
             if (c.moveToFirst()) c.getString(0) else null
         } ?: "BackdropCam.mp4"

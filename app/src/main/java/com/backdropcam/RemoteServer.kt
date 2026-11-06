@@ -11,7 +11,10 @@ import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketException
-import kotlin.random.Random
+import java.security.MessageDigest
+import java.security.SecureRandom
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * A tiny web server on the local Wi-Fi so another phone, tablet or laptop can watch the camera
@@ -35,7 +38,14 @@ class RemoteServer(
         val camera: String = "",
     )
 
-    val key: String = (1..6).map { "abcdefghjkmnpqrstuvwxyz23456789"[Random.nextInt(31)] }.joinToString("")
+    /** Secret in the link: 10 characters from a secure random source (about 50 bits). */
+    val key: String = SecureRandom().let { r -> (1..10).map { "abcdefghjkmnpqrstuvwxyz23456789"[r.nextInt(31)] }.joinToString("") }
+    private val keyBytes = key.toByteArray()
+
+    /** Wrong keys per address, and when that address may try again (blocks guessing). */
+    private class Strikes(var count: Int = 0, var blockedUntil: Long = 0L)
+    private val strikes = ConcurrentHashMap<String, Strikes>()
+    private val openConnections = AtomicInteger(0)
     @Volatile var port = 0; private set
     @Volatile private var running = false
     private var server: ServerSocket? = null
@@ -66,7 +76,18 @@ class RemoteServer(
         Thread({
             while (running) {
                 val client = try { s.accept() } catch (e: SocketException) { break }
-                Thread({ handle(client) }, "remote-client").apply { isDaemon = true }.start()
+                // Only devices on the same local network (or this phone) may connect, and only a
+                // few at a time, so the phone cannot be flooded.
+                val addr = client.inetAddress
+                val local = addr.isSiteLocalAddress || addr.isLoopbackAddress || addr.isLinkLocalAddress
+                if (!local || openConnections.get() >= MAX_CONNECTIONS) {
+                    runCatching { client.close() }
+                    continue
+                }
+                openConnections.incrementAndGet()
+                Thread({
+                    try { handle(client) } finally { openConnections.decrementAndGet() }
+                }, "remote-client").apply { isDaemon = true }.start()
             }
         }, "remote-accept").apply { isDaemon = true }.start()
         return true
@@ -100,16 +121,30 @@ class RemoteServer(
                 sock.soTimeout = 15_000
                 sock.tcpNoDelay = true
                 runCatching { sock.sendBufferSize = 512 * 1024 }
-                val reader = BufferedReader(InputStreamReader(sock.getInputStream()))
-                val requestLine = reader.readLine() ?: return
-                while (true) { val l = reader.readLine() ?: break; if (l.isEmpty()) break } // skip headers
-                val target = requestLine.split(" ").getOrNull(1) ?: "/"
+                val reader = BufferedReader(InputStreamReader(sock.getInputStream()), 4096)
+                val requestLine = readLimitedLine(reader) ?: return
+                // Skip the headers, but never read more than a small, fixed amount.
+                var headerLines = 0
+                while (headerLines++ < 64) { val l = readLimitedLine(reader) ?: break; if (l.isEmpty()) break }
+                val parts = requestLine.split(" ")
+                if (parts.getOrNull(0) != "GET") return
+                val target = parts.getOrNull(1) ?: "/"
                 val path = target.substringBefore('?')
                 val query = target.substringAfter('?', "").split('&').associate {
                     it.substringBefore('=') to it.substringAfter('=', "")
                 }
                 val out = sock.getOutputStream()
-                if (query["k"] != key) return send(out, 403, "text/plain", "Open the link shown in BackdropCam.".toByteArray())
+                val ip = sock.inetAddress.hostAddress ?: "?"
+                val st = strikes.getOrPut(ip) { Strikes() }
+                val now = System.currentTimeMillis()
+                if (now < st.blockedUntil) return send(out, 429, "text/plain", "Too many wrong links. Wait a minute.".toByteArray())
+                val given = (query["k"] ?: "").toByteArray()
+                if (!MessageDigest.isEqual(given, keyBytes)) {
+                    // A few mistakes are fine; then this address must wait before trying again.
+                    if (++st.count >= 5) { st.blockedUntil = now + 60_000; st.count = 0 }
+                    return send(out, 403, "text/plain", "Open the link shown in BackdropCam.".toByteArray())
+                }
+                st.count = 0
                 when (path) {
                     "/" -> send(out, 200, "text/html; charset=utf-8", page().toByteArray())
                     "/status" -> {
@@ -158,8 +193,9 @@ class RemoteServer(
     }
 
     private fun send(out: OutputStream, code: Int, type: String, body: ByteArray) {
-        val reason = when (code) { 200 -> "OK"; 403 -> "Forbidden"; else -> "Not Found" }
-        out.write("HTTP/1.1 $code $reason\r\nContent-Type: $type\r\nContent-Length: ${body.size}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n".toByteArray())
+        val reason = when (code) { 200 -> "OK"; 403 -> "Forbidden"; 429 -> "Too Many Requests"; else -> "Not Found" }
+        out.write(("HTTP/1.1 $code $reason\r\nContent-Type: $type\r\nContent-Length: ${body.size}\r\nCache-Control: no-store\r\n" +
+            "X-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nX-Frame-Options: DENY\r\nConnection: close\r\n\r\n").toByteArray())
         out.write(body)
         out.flush()
     }
@@ -234,7 +270,21 @@ async function poll(){
 poll();
 </script></body></html>"""
 
+    /** Reads one line of at most 2 KB; longer lines (or none) end the request. */
+    private fun readLimitedLine(r: BufferedReader): String? {
+        val sb = StringBuilder()
+        while (true) {
+            val c = r.read()
+            if (c < 0) return if (sb.isEmpty()) null else sb.toString()
+            if (c == '\n'.code) return sb.toString().trimEnd('\r')
+            if (sb.length >= 2048) return null
+            sb.append(c.toChar())
+        }
+    }
+
     companion object {
+        private const val MAX_CONNECTIONS = 8
+
         fun localAddresses(): List<String> = runCatching {
             NetworkInterface.getNetworkInterfaces().toList()
                 .filter { it.isUp && !it.isLoopback }

@@ -27,10 +27,29 @@ class BackdropStore(private val context: Context) {
     fun add(uri: Uri): File {
         val type = context.contentResolver.getType(uri) ?: ""
         if (type.startsWith("video/")) {
+            val max = 300L * 1024 * 1024
             val size = context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length } ?: -1L
-            if (size > 300L * 1024 * 1024) error("Video is too large (over 300 MB)")
+            if (size > max) error("Video is too large (over 300 MB)")
             val f = File(dir, "bd_${System.currentTimeMillis()}.mp4")
-            context.contentResolver.openInputStream(uri)!!.use { input -> f.outputStream().use { input.copyTo(it) } }
+            // The size is not always known in advance: count while copying and stop at the limit.
+            try {
+                context.contentResolver.openInputStream(uri)!!.use { input ->
+                    f.outputStream().use { out ->
+                        val buf = ByteArray(256 * 1024)
+                        var total = 0L
+                        while (true) {
+                            val n = input.read(buf)
+                            if (n < 0) break
+                            total += n
+                            if (total > max) error("Video is too large (over 300 MB)")
+                            out.write(buf, 0, n)
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                f.delete()
+                throw e
+            }
             return f
         }
         val bmp = ImageUtils.decode({ context.contentResolver.openInputStream(uri)!! }, 3840)
