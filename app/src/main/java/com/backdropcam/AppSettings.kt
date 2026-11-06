@@ -109,11 +109,6 @@ class AppSettings(context: Context) {
         get() = p.getString("lastVideo", null)
         set(v) = p.edit().putString("lastVideo", v).apply()
 
-    /** Spoken framing guidance plus "start" / "stop" voice commands. */
-    var handsFree: Boolean
-        get() = p.getBoolean("handsFree", false)
-        set(v) = p.edit().putBoolean("handsFree", v).apply()
-
     /** Back camera: use the ultra-wide (zoomed out) lens when the phone has one. */
     var wideStart: Boolean
         get() = p.getBoolean("wideStart", true)
@@ -184,78 +179,6 @@ class AppSettings(context: Context) {
     var smallFiles: Boolean
         get() = p.getBoolean("smallFiles", true)
         set(v) = p.edit().putBoolean("smallFiles", v).apply()
-
-    // ---------------------------------------------------------------- music
-
-    var musicOn: Boolean
-        get() = p.getBoolean("musicOn", false)
-        set(v) = p.edit().putBoolean("musicOn", v).apply()
-
-    /** 0..1 */
-    var musicVolume: Float
-        get() = p.getFloat("musicVolume", 0.3f)
-        set(v) = p.edit().putFloat("musicVolume", v).apply()
-
-    var musicDuck: Boolean
-        get() = p.getBoolean("musicDuck", true)
-        set(v) = p.edit().putBoolean("musicDuck", v).apply()
-
-    var musicName: String
-        get() = p.getString("musicName", "")!!
-        set(v) = p.edit().putString("musicName", v).apply()
-
-    // ---------------------------------------------------------------- brand kit
-
-    var brandName: String
-        get() = p.getString("brandName", "")!!
-        set(v) = p.edit().putString("brandName", v).apply()
-
-    var brandRole: String
-        get() = p.getString("brandRole", "")!!
-        set(v) = p.edit().putString("brandRole", v).apply()
-
-    var brandColor: Int
-        get() = p.getInt("brandColor", OverlayComposer.DEFAULT_COLOR)
-        set(v) = p.edit().putInt("brandColor", v).apply()
-
-    /** Show the name title (lower third) on the video. */
-    var nameTitleOn: Boolean
-        get() = p.getBoolean("nameTitleOn", false)
-        set(v) = p.edit().putBoolean("nameTitleOn", v).apply()
-
-    /** Show an intro card for the first seconds of every recording. */
-    var introOn: Boolean
-        get() = p.getBoolean("introOn", false)
-        set(v) = p.edit().putBoolean("introOn", v).apply()
-
-    var introTitle: String
-        get() = p.getString("introTitle", "")!!
-        set(v) = p.edit().putString("introTitle", v).apply()
-
-    /** Brand settings and logo positions, for sharing a kit with the team. */
-    fun exportBrand(): org.json.JSONObject {
-        val o = org.json.JSONObject()
-            .put("brandName", brandName).put("brandRole", brandRole).put("brandColor", brandColor)
-            .put("nameTitleOn", nameTitleOn).put("introOn", introOn).put("introTitle", introTitle)
-        val logos = org.json.JSONObject()
-        for ((k, v) in p.all) if (k.startsWith("logo_") && v is String) logos.put(k, v)
-        o.put("logoPlacements", logos)
-        return o
-    }
-
-    fun importBrand(o: org.json.JSONObject) {
-        val e = p.edit()
-        e.putString("brandName", o.optString("brandName", brandName))
-        e.putString("brandRole", o.optString("brandRole", brandRole))
-        e.putInt("brandColor", o.optInt("brandColor", brandColor))
-        e.putBoolean("nameTitleOn", o.optBoolean("nameTitleOn", nameTitleOn))
-        e.putBoolean("introOn", o.optBoolean("introOn", introOn))
-        e.putString("introTitle", o.optString("introTitle", introTitle))
-        o.optJSONObject("logoPlacements")?.let { logos ->
-            for (k in logos.keys()) if (k.startsWith("logo_")) e.putString(k, logos.getString(k))
-        }
-        e.apply()
-    }
 
     val qualityCap: Int
         get() = when (quality) {

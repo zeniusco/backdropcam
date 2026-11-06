@@ -198,13 +198,6 @@
             android:src="@drawable/ic_mic" />
 
         <ImageButton
-            android:id="@+id/handsBtn"
-            style="@style/RailIcon"
-            android:layout_marginTop="4dp"
-            android:contentDescription="Hands-free voice mode"
-            android:src="@drawable/ic_record_voice_over" />
-
-        <ImageButton
             android:id="@+id/tuneBtn"
             style="@style/RailIcon"
             android:layout_marginTop="4dp"

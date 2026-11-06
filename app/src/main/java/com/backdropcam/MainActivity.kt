@@ -65,7 +65,6 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.view.updatePadding
-import androidx.core.content.FileProvider
 import androidx.core.widget.ImageViewCompat
 import androidx.core.widget.doAfterTextChanged
 import androidx.core.widget.TextViewCompat
@@ -94,7 +93,6 @@ import kotlin.math.roundToInt
  * The camera screen. The heavy lifting lives elsewhere:
  *  - [CompositeEngine]: camera -> cut-out -> backdrop, on the GPU, to the screen and the encoder
  *  - [VideoRecorder]:   encodes and saves the MP4
- *  - [KeywordSpotter], [Speaker], [FramingCoach]: hands-free mode
  * This class wires the UI to them.
  */
 class MainActivity : AppCompatActivity() {
@@ -104,9 +102,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var engine: CompositeEngine
     private lateinit var backdrops: BackdropStore
     private lateinit var scripts: ScriptStore
-    private lateinit var speaker: Speaker
-    private lateinit var coach: FramingCoach
-    private lateinit var voice: KeywordSpotter
 
     private val io = Executors.newSingleThreadExecutor()
     private val uploadExecutor = Executors.newSingleThreadExecutor()
@@ -183,59 +178,6 @@ class MainActivity : AppCompatActivity() {
     private val pickBackdrop =
         registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri -> if (uri != null) addBackdrop(uri) }
 
-    private val overlay = OverlayComposer()
-    private val overlayExecutor = Executors.newSingleThreadExecutor()
-    @Volatile private var overlayState = OverlayComposer.State()
-    private var overlayDirty = false
-    private var introAlpha = 0f
-    private var introStartMs = 0L
-    private lateinit var brandKit: BrandKit
-
-    private val importKit =
-        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-            if (uri != null) io.execute {
-                try {
-                    val what = brandKit.import(uri)
-                    val logo = backdrops.loadLogo()
-                    main.post {
-                        if (logo != null) engine.setLogo(logo)
-                        buildBackdropStrip()
-                        applyBackdropSelection()
-                        updateOverlay()
-                        hint("Brand kit imported: $what")
-                    }
-                } catch (e: Exception) {
-                    main.post { hint("Could not import: ${e.message}") }
-                }
-            }
-        }
-
-    private val musicFile by lazy { File(filesDir, "music") }
-    private var refreshMusicUi: (() -> Unit)? = null
-
-    private val pickMusic =
-        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-            if (uri != null) io.execute {
-                try {
-                    val size = contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length } ?: -1L
-                    if (size > 80L * 1024 * 1024) error("file is over 80 MB")
-                    var name = "Music"
-                    contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
-                        if (c.moveToFirst()) name = c.getString(0) ?: name
-                    }
-                    contentResolver.openInputStream(uri)!!.use { input -> musicFile.outputStream().use { input.copyTo(it) } }
-                    main.post {
-                        settings.musicName = name
-                        settings.musicOn = true
-                        refreshMusicUi?.invoke()
-                        hint("Music added: $name")
-                    }
-                } catch (e: Exception) {
-                    main.post { hint("Could not use that music: ${e.message}") }
-                }
-            }
-        }
-
     private val importScript =
         registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             if (uri != null) io.execute {
@@ -275,7 +217,6 @@ class MainActivity : AppCompatActivity() {
         if (crashedLastTime) settings.enterSafeMode()
         backdrops = BackdropStore(this)
         scripts = ScriptStore(this)
-        brandKit = BrandKit(this, settings)
         micGain = settings.micGain
         lastVideo = settings.lastVideo?.let(Uri::parse)
 
@@ -284,21 +225,10 @@ class MainActivity : AppCompatActivity() {
             onFraming = { f ->
                 lastFraming = f
                 warnIfHeadCut(f)
-                if (settings.handsFree && recorder == null && countdown == null && !speaker.isSpeaking) coach.update(f)
             }
-            framingWanted = settings.handsFree
             onTooSlow = { lightMode = true; easeForSlowPhone() }
             lightMode = settings.lowEndPhone || settings.safeMode
         }
-        speaker = Speaker(this)
-        coach = FramingCoach { speak(it) }
-        voice = KeywordSpotter(this) { word, atUs -> main.post { onKeyword(word, atUs) } }
-        // Whenever the phone stops talking (for any reason) the ear opens again shortly after.
-        speaker.onIdle = {
-            voice.mutedUntil = System.currentTimeMillis() + 700
-            startListening()
-        }
-        if (needsSpeechModel()) loadVoice()
         applyEngineOptions()
         loadSegmenter()
 
@@ -311,7 +241,6 @@ class MainActivity : AppCompatActivity() {
 
         updateMicUi()
         updateTimerUi()
-        updateHandsFreeUi()
         updateTeleUi()
         ui.aspectChip.text = viewModeLabel()
         buildBackdropStrip()
@@ -410,7 +339,6 @@ class MainActivity : AppCompatActivity() {
         if (now - darkSinceMs < 3000 || recorder != null || countdown != null || now - lastDarkHintMs < 90_000) return
         lastDarkHintMs = now
         hint("It's quite dark here. Face a window or a lamp, or turn on more lights, for a sharper video and a cleaner cut-out.")
-        if (settings.handsFree) speak("It's a bit dark. Try facing a window or a lamp.")
     }
 
     /** Long 4K recordings make phones hot; say so before the phone itself slows down. */
@@ -445,7 +373,6 @@ class MainActivity : AppCompatActivity() {
         (getSystemService(SENSOR_SERVICE) as? SensorManager)?.let { sm ->
             sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)?.let { sm.registerListener(tiltListener, it, SensorManager.SENSOR_DELAY_UI) }
         }
-        startListening()
     }
 
     override fun onPause() {
@@ -455,20 +382,16 @@ class MainActivity : AppCompatActivity() {
         engine.setBackdropVideoPlaying(false)
         orientationListener.disable()
         (getSystemService(SENSOR_SERVICE) as? SensorManager)?.unregisterListener(tiltListener)
-        cancelCountdown(announce = false)
+        cancelCountdown()
         if (recorder != null) stopRecording()
         micMonitor?.stop()
         micMonitor = null
-        voice.stop()
-        speaker.stop()
     }
 
     override fun onDestroy() {
         super.onDestroy()
         teleRunning = false
         remote?.stop()
-        voice.close()
-        speaker.shutdown()
         engine.release()
         // The executors are left running: a save or upload that is still in flight finishes on
         // its own, and its result is dropped because the activity is gone.
@@ -524,7 +447,6 @@ class MainActivity : AppCompatActivity() {
         ui.qualityChip.setOnClickListener { cycleQuality() }
         ui.timerChip.setOnClickListener { cycleTimer() }
         ui.micBtn.setOnClickListener { onMicPressed() }
-        ui.handsBtn.setOnClickListener { if (!busy()) setHandsFree(!settings.handsFree) }
         ui.tuneBtn.setOnClickListener { setAdjustOpen(!adjustOpen) }
         ui.logoBtn.setOnClickListener { onLogoButton() }
         ui.remoteBtn.setOnClickListener { showRemoteSheet() }
@@ -589,7 +511,6 @@ class MainActivity : AppCompatActivity() {
                     rotateControls(target)
                     updateTeleUi()
                     ui.aspectChip.text = viewModeLabel()
-                    updateOverlay()
                 }
             }
         }
@@ -762,7 +683,6 @@ class MainActivity : AppCompatActivity() {
         engine.setCrop(cropX, cropY)
         ui.surface.layoutParams = lp
         ui.aspectChip.text = viewModeLabel()
-        updateOverlay()
     }
 
     private fun viewModeLabel() = when (settings.viewMode) {
@@ -1230,15 +1150,13 @@ class MainActivity : AppCompatActivity() {
         when {
             recorder != null -> stopRecording()
             countdown != null -> cancelCountdown()
-            settings.handsFree -> startCountdown(max(settings.timer, 3))
             settings.timer > 0 -> startCountdown(settings.timer)
             else -> startRecording()
         }
     }
 
     private fun startCountdown(seconds: Int) {
-        val spoken = settings.handsFree
-        val tone = if (spoken) null else runCatching { ToneGenerator(AudioManager.STREAM_MUSIC, 70) }.getOrNull()
+        val tone = runCatching { ToneGenerator(AudioManager.STREAM_MUSIC, 70) }.getOrNull()
         countdownTone = tone
         ui.countdownText.visibility = View.VISIBLE
         setShutter(true)
@@ -1249,7 +1167,7 @@ class MainActivity : AppCompatActivity() {
                 ui.countdownText.scaleX = 1.3f
                 ui.countdownText.scaleY = 1.3f
                 ui.countdownText.animate().scaleX(1f).scaleY(1f).setDuration(250).start()
-                if (spoken) speak(n) else tone?.startTone(ToneGenerator.TONE_PROP_BEEP, 120)
+                tone?.startTone(ToneGenerator.TONE_PROP_BEEP, 120)
             }
 
             override fun onFinish() {
@@ -1262,7 +1180,7 @@ class MainActivity : AppCompatActivity() {
         }.start()
     }
 
-    private fun cancelCountdown(announce: Boolean = true) {
+    private fun cancelCountdown() {
         if (countdown == null) return
         countdown?.cancel()
         countdown = null
@@ -1270,7 +1188,6 @@ class MainActivity : AppCompatActivity() {
         countdownTone = null
         ui.countdownText.visibility = View.GONE
         if (recorder == null) setShutter(false)
-        if (announce && settings.handsFree) speak("Cancelled.")
     }
 
     private fun startRecording() {
@@ -1290,15 +1207,9 @@ class MainActivity : AppCompatActivity() {
         val size = VideoRecorder.pickEncoderSize(ww, wh)
         val audio = settings.micOn && granted(Manifest.permission.RECORD_AUDIO)
         if (settings.micOn && !audio) hint("Recording without sound: microphone access is not allowed for BackdropCam")
-        val listenForStop = settings.handsFree && audio
-        if (settings.handsFree && !audio) hint("Without sound, say nothing: tap the button or press a volume key to stop")
 
         micMonitor?.stop()
         micMonitor = null
-        voice.stop() // free the microphone for the recorder
-        voice.reset()
-        voice.mutedUntil = 0L
-        speaker.stop()
         micMuted = false
         try {
             val rec = VideoRecorder(
@@ -1310,10 +1221,6 @@ class MainActivity : AppCompatActivity() {
                     main.post { ui.levelBar.progress = (level * 100).toInt() }
                 },
                 // In hands-free mode the recording's own sound is checked for "stop".
-                onPcm = if (listenForStop) { pcm: ShortArray, n: Int, t: Long -> voice.feed48k(pcm, n, t) } else null,
-                music = if (audio && settings.musicOn && musicFile.exists()) MusicSource(musicFile) else null,
-                musicVolume = { settings.musicVolume },
-                musicDuck = { settings.musicDuck },
                 preferHevc = settings.smallFiles,
             )
             rec.start()
@@ -1344,10 +1251,6 @@ class MainActivity : AppCompatActivity() {
         }
         setControlsEnabled(false)
         updateMicUi()
-        if (settings.introOn && (settings.introTitle.isNotBlank() || settings.brandName.isNotBlank())) {
-            introStartMs = System.currentTimeMillis()
-            tickIntro()
-        }
         tickTimer()
     }
 
@@ -1374,7 +1277,6 @@ class MainActivity : AppCompatActivity() {
         val rec = recorder ?: return
         if (rec.paused) {
             rec.resume()
-            voice.reset() // word timings restart with the resumed recording clock
             recDotBlink?.resume()
             if (ui.teleBox.visibility == View.VISIBLE) teleRunning = true
             ui.pauseBtn.setImageResource(R.drawable.ic_pause)
@@ -1390,10 +1292,6 @@ class MainActivity : AppCompatActivity() {
     private fun stopRecording() {
         val rec = recorder ?: return
         recorder = null
-        if (introAlpha > 0f) {
-            introAlpha = 0f
-            updateOverlay()
-        }
         setShutter(false)
         recDotBlink?.cancel()
         recDotBlink = null
@@ -1412,7 +1310,6 @@ class MainActivity : AppCompatActivity() {
                 } catch (e: Exception) {
                     main.post {
                         hint("Could not save the video: ${e.message}")
-                        if (settings.handsFree) speak("Sorry, saving failed.")
                     }
                 }
             }
@@ -1429,7 +1326,6 @@ class MainActivity : AppCompatActivity() {
         if (isFinishing || isDestroyed) return
         showResultSheet(uri, "${rec.width} × ${rec.height} · Movies/BackdropCam")
         if (settings.autoUpload && settings.driveInApp) startUpload()
-        if (settings.handsFree) speak("Saved. Say start to record again.") { coach.reset() }
     }
 
     /** Red circle when idle; it shrinks into a rounded "stop" square while recording. */
@@ -1505,7 +1401,6 @@ class MainActivity : AppCompatActivity() {
             settings.micGain = micGain
             b.gainValue.text = "${value.toInt()}%"
         }
-        voice.stop() // the level test needs the microphone
         if (granted(Manifest.permission.RECORD_AUDIO)) {
             micMonitor = MicMonitor({ micGain }) { level ->
                 main.post { b.levelMeter.setProgressCompat((level * 100).toInt(), true) }
@@ -1514,7 +1409,6 @@ class MainActivity : AppCompatActivity() {
         dlg.setOnDismissListener {
             micMonitor?.stop()
             micMonitor = null
-            startListening()
         }
         dlg.show()
     }
@@ -1569,72 +1463,6 @@ class MainActivity : AppCompatActivity() {
         b.autoUploadSwitch.isChecked = settings.autoUpload
         b.autoUploadSwitch.setOnCheckedChangeListener { _, on -> settings.autoUpload = on }
 
-        // Music
-        val refreshMusic = {
-            val has = musicFile.exists()
-            b.musicName.text = if (has) settings.musicName.ifBlank { "Music" } else "No music chosen"
-            b.musicRemoveBtn.isEnabled = has
-            b.musicSwitch.isEnabled = has
-            b.musicSwitch.isChecked = has && settings.musicOn
-        }
-        refreshMusicUi = refreshMusic
-        dlg.setOnDismissListener { if (refreshMusicUi === refreshMusic) refreshMusicUi = null }
-        refreshMusic()
-        b.musicPickBtn.setOnClickListener { pickMusic.launch(arrayOf("audio/*")) }
-        b.musicRemoveBtn.setOnClickListener {
-            musicFile.delete()
-            settings.musicOn = false
-            refreshMusic()
-        }
-        b.musicSwitch.setOnCheckedChangeListener { _, on ->
-            settings.musicOn = on
-            if (on && !settings.micOn) hint("Music needs \"Record sound\" on (mic button)")
-        }
-        b.musicVolume.value = (settings.musicVolume * 100f).coerceIn(0f, 100f)
-        b.musicVolume.addOnChangeListener { _, v, _ -> settings.musicVolume = v / 100f }
-        b.musicDuckSwitch.isChecked = settings.musicDuck
-        b.musicDuckSwitch.setOnCheckedChangeListener { _, on -> settings.musicDuck = on }
-
-        // Brand
-        b.brandName.setText(settings.brandName)
-        b.brandRole.setText(settings.brandRole)
-        b.introTitle.setText(settings.introTitle)
-        b.brandName.doAfterTextChanged { settings.brandName = it.toString().trim(); updateOverlay() }
-        b.brandRole.doAfterTextChanged { settings.brandRole = it.toString().trim(); updateOverlay() }
-        b.introTitle.doAfterTextChanged { settings.introTitle = it.toString().trim() }
-        b.nameTitleSwitch.isChecked = settings.nameTitleOn
-        b.nameTitleSwitch.setOnCheckedChangeListener { _, on ->
-            settings.nameTitleOn = on
-            if (on && settings.brandName.isBlank()) hint("Type your name above to show it")
-            updateOverlay()
-        }
-        b.introSwitch.isChecked = settings.introOn
-        b.introSwitch.setOnCheckedChangeListener { _, on ->
-            settings.introOn = on
-            if (on && settings.introTitle.isBlank() && settings.brandName.isBlank()) hint("Type an intro title or your name, or the card has nothing to show")
-        }
-        fun drawColors() {
-            b.brandColors.removeAllViews()
-            for (c in OverlayComposer.BRAND_COLORS) {
-                b.brandColors.addView(View(this).apply {
-                    layoutParams = LinearLayout.LayoutParams(dp(34), dp(34)).apply { marginEnd = dp(10) }
-                    background = GradientDrawable().apply {
-                        shape = GradientDrawable.OVAL
-                        setColor(c)
-                        setStroke(dp(if (c == settings.brandColor) 3 else 1), if (c == settings.brandColor) 0xFFFFFFFF.toInt() else 0x55FFFFFF)
-                    }
-                    contentDescription = "Brand colour"
-                    setOnClickListener {
-                        settings.brandColor = c
-                        drawColors()
-                        updateOverlay()
-                    }
-                })
-            }
-        }
-        drawColors()
-        b.exportKitBtn.setOnClickListener { shareBrandKit() }
-        b.importKitBtn.setOnClickListener { importKit.launch(arrayOf("application/zip", "application/octet-stream")) }
         dlg.show()
     }
 
@@ -1737,14 +1565,11 @@ class MainActivity : AppCompatActivity() {
 
     /**
      * While a recording is played back (or previewed for trimming) the camera, the cut-out and
-     * the voice listener are switched off: they would waste battery and memory, and hands-free
-     * could even hear "start" in the video's own sound.
+     * the backdrop video are switched off: they would only waste battery and memory.
      */
     private fun pauseCameraForPlayback(pause: Boolean) {
         if (pause) {
             if (playbackPauses++ > 0) return
-            voice.stop()
-            speaker.stop()
             engine.setBackdropVideoPlaying(false)
             runCatching { ProcessCameraProvider.getInstance(this).get().unbindAll() }
             camera = null
@@ -1752,7 +1577,6 @@ class MainActivity : AppCompatActivity() {
             if (playbackPauses == 0 || --playbackPauses > 0) return
             engine.setBackdropVideoPlaying(true)
             bindCamera()
-            startListening()
         }
     }
 
@@ -1987,81 +1811,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun shareText(text: String) {
         startActivitySafe(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text), "Share link"))
-    }
-
-    // ================================================================== hands-free
-
-    private fun setHandsFree(on: Boolean) {
-        if (on && !granted(Manifest.permission.RECORD_AUDIO)) return hint("Hands-free needs microphone permission")
-        settings.handsFree = on
-        engine.framingWanted = on
-        updateHandsFreeUi()
-        coach.reset()
-        if (on) {
-            if (!settings.micOn) hint("Hands-free on. Turn Record sound on (mic button) so it can hear “stop” while recording")
-            else hint("Hands-free on: say “start” to record, “stop” to finish")
-            speak("Hands-free on. I will guide you into the frame. Say start to record, and say stop to finish.")
-            loadVoice()
-        } else {
-            speaker.stop()
-            voice.stop()
-            if (!needsSpeechModel()) voice.unload()
-            hint("Hands-free off")
-        }
-    }
-
-    /** The offline speech model (about 100 MB of memory) is only loaded for hands-free mode. */
-    private fun needsSpeechModel() = settings.handsFree
-
-    /** Loads the offline speech model (about 100 MB of memory), so only while hands-free is on. */
-    private fun loadVoice() {
-        if (voice.available) return
-        if (!File(filesDir, "vosk-en").exists()) hint("Preparing speech recognition, this takes a moment the first time")
-        voice.load { ok ->
-            main.post {
-                when {
-                    !needsSpeechModel() -> voice.unload() // switched off again while loading
-                    !ok -> hint("Voice commands could not start. Guidance still works.")
-                    else -> startListening()
-                }
-            }
-        }
-    }
-
-    private fun updateHandsFreeUi() = setActive(ui.handsBtn, settings.handsFree)
-
-    /**
-     * Says [text] out loud. Keyword listening ignores what is heard while the phone speaks, so it
-     * can never react to its own "say start"; [Speaker.onIdle] lifts the mute afterwards.
-     */
-    private fun speak(text: String, done: (() -> Unit)? = null) {
-        voice.mutedUntil = Long.MAX_VALUE
-        speaker.say(text, done)
-    }
-
-    private fun startListening() {
-        if (foreground && settings.handsFree && recorder == null && micMonitor == null && playbackPauses == 0) voice.start()
-    }
-
-    /** "start"/"action" while idle; "stop"/"cut" while recording or counting down. */
-    private fun onKeyword(word: String, atUs: Long) {
-        if (!settings.handsFree) return
-        if (word in KeywordSpotter.START_WORDS) {
-            if (recorder == null && countdown == null) {
-                speak("Okay. Recording in") {
-                    if (recorder == null && countdown == null) startCountdown(max(settings.timer, 3))
-                }
-            }
-        } else if (word in KeywordSpotter.STOP_WORDS) {
-            val rec = recorder
-            when {
-                rec != null -> {
-                    rec.cutoffUs = max(0L, atUs - 250_000L) // cut the spoken word off the end
-                    stopRecording()
-                }
-                countdown != null -> cancelCountdown()
-            }
-        }
     }
 
     // ================================================================== teleprompter
@@ -2395,71 +2144,6 @@ class MainActivity : AppCompatActivity() {
         return Bitmap.createBitmap(px, size, size, Bitmap.Config.ARGB_8888)
     }
 
-    // ================================================================== text overlay and brand kit
-
-    /** Redraws the text layer (name title, intro card, captions) for the current picture shape. */
-    private fun updateOverlay() {
-        val nw = engine.naturalWidth
-        val nh = engine.naturalHeight
-        if (nw == 0 || nh == 0) return
-        var vw = nw * cropX
-        var vh = nh * cropY
-        if (deviceRotation % 180 != 0) vw = vh.also { vh = vw }
-        overlayState = OverlayComposer.State(
-            name = settings.brandName,
-            role = settings.brandRole,
-            brandColor = settings.brandColor,
-            showNameTitle = settings.nameTitleOn,
-            introTitle = settings.introTitle,
-            introSubtitle = "",
-            introAlpha = introAlpha,
-            caption = "",
-        )
-        // Coalesce: only the newest state is drawn.
-        if (overlayDirty) return
-        overlayDirty = true
-        overlayExecutor.execute {
-            main.post { overlayDirty = false }
-            val bmp = runCatching { overlay.render(vw, vh, overlayState) }.getOrNull()
-            engine.setOverlay(bmp)
-        }
-    }
-
-
-    /** Intro card: fades in, holds, fades out over the first ~3 seconds of a recording. */
-    private fun tickIntro() {
-        if (recorder == null) return
-        val t = (System.currentTimeMillis() - introStartMs) / 1000f
-        introAlpha = when {
-            t < 0.35f -> t / 0.35f
-            t < 2.6f -> 1f
-            t < 3.1f -> 1f - (t - 2.6f) / 0.5f
-            else -> 0f
-        }
-        updateOverlay()
-        if (t < 3.1f) main.postDelayed({ tickIntro() }, 80)
-    }
-
-    private fun shareBrandKit() {
-        io.execute {
-            try {
-                val file = brandKit.export()
-                val uri = FileProvider.getUriForFile(this, "$packageName.files", file)
-                main.post {
-                    startActivitySafe(
-                        Intent.createChooser(
-                            Intent(Intent.ACTION_SEND).setType("application/zip").putExtra(Intent.EXTRA_STREAM, uri)
-                                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
-                            "Share brand kit"
-                        )
-                    )
-                }
-            } catch (e: Exception) {
-                main.post { hint("Could not create the kit: ${e.message}") }
-            }
-        }
-    }
-
     // ================================================================== helpers
 
     /** A short message over the camera picture (replaces system toasts). */
@@ -2498,7 +2182,7 @@ class MainActivity : AppCompatActivity() {
         // square, and the pill and hint are centred with room around them, so nothing clips.
         val views = mutableListOf<View>(
             ui.settingsBtn, ui.flashBtn, ui.aspectChip, ui.qualityChip, ui.timerChip,
-            ui.micBtn, ui.handsBtn, ui.tuneBtn, ui.teleBtn,
+            ui.micBtn, ui.tuneBtn, ui.teleBtn,
             ui.pauseBtn, ui.flipBtn, ui.lastThumb, ui.countdownText, ui.recPill, ui.hintText,
             ui.tabSize, ui.tabLight, ui.tabWarmth, ui.adjustValue, ui.logoBtn, ui.remoteBtn,
             ui.logoPickBtn, ui.logoShowBtn, ui.logoLayerBtn, ui.logoDeleteBtn, ui.logoDoneBtn, ui.logoValue,
