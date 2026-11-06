@@ -118,7 +118,7 @@ class PersonSegmenter(context: Context, highQuality: Boolean, allowGpu: Boolean 
                 // (the flicker around your outline): hold it steady. Where the picture changed,
                 // you moved: follow the new mask at once, so nothing trails behind you.
                 val moved = abs(luma[i] - pl[i])
-                val a = SMOOTHING * (1f - ((moved - 0.03f) / 0.09f).coerceIn(0f, 1f))
+                val a = SMOOTHING * (1f - ((moved - 0.04f) / 0.12f).coerceIn(0f, 1f))
                 v = a * p[i] + (1f - a) * v
             }
             cur[i] = v
@@ -142,8 +142,12 @@ class PersonSegmenter(context: Context, highQuality: Boolean, allowGpu: Boolean 
             val sy = (y * bh / h).coerceIn(0, bh - 2)
             for (x in 0 until w) {
                 val sx = (x * bw / w).coerceIn(0, bw - 2)
-                val i = sy * bw + sx
-                out[y * w + x] = (lum(pixels[i]) + lum(pixels[i + 1]) + lum(pixels[i + bw]) + lum(pixels[i + bw + 1])) / 4f
+                // 3 x 3 average: fabric texture and camera noise must not count as movement.
+                val x0 = (sx - 1).coerceAtLeast(0)
+                val y0 = (sy - 1).coerceAtLeast(0)
+                var sum = 0f
+                for (yy in y0..y0 + 2) for (xx in x0..x0 + 2) sum += lum(pixels[yy.coerceAtMost(bh - 1) * bw + xx.coerceAtMost(bw - 1)])
+                out[y * w + x] = sum / 9f
             }
         }
         return out
@@ -158,7 +162,7 @@ class PersonSegmenter(context: Context, highQuality: Boolean, allowGpu: Boolean 
     companion object {
         private const val TAG = "PersonSegmenter"
         /** Temporal smoothing of still edges: higher is steadier. Moving edges are not smoothed. */
-        private const val SMOOTHING = 0.75f
+        private const val SMOOTHING = 0.8f
         const val MODEL_HQ = "selfie_multiclass_256x256.tflite"
         const val MODEL_FAST = "selfie_segmenter.tflite"
     }

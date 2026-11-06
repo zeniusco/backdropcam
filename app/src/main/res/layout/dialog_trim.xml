@@ -7,13 +7,27 @@
     android:paddingTop="8dp"
     android:paddingEnd="24dp">
 
-    <ImageView
-        android:id="@+id/trimFrame"
+    <FrameLayout
         android:layout_width="match_parent"
-        android:layout_height="200dp"
-        android:background="@drawable/bg_item"
-        android:contentDescription="Frame at the trim point"
-        android:scaleType="fitCenter" />
+        android:layout_height="280dp"
+        android:background="#000000">
+
+        <VideoView
+            android:id="@+id/trimVideo"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center" />
+
+        <ImageView
+            android:id="@+id/trimPlay"
+            android:layout_width="56dp"
+            android:layout_height="56dp"
+            android:layout_gravity="center"
+            android:background="@drawable/bg_circle_dark"
+            android:contentDescription="Play the part you keep"
+            android:padding="12dp"
+            android:src="@drawable/ic_play_arrow" />
+    </FrameLayout>
 
     <com.google.android.material.slider.RangeSlider
         android:id="@+id/trimRange"
@@ -36,7 +50,7 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="4dp"
         android:gravity="center"
-        android:text="Drag the two handles. The start snaps to the nearest second before it."
+        android:text="Drag the handles to see where to cut, then press play to watch the part you keep. The start snaps to the nearest second before it."
         android:textColor="@color/text_secondary"
         android:textSize="12sp" />
 </LinearLayout>

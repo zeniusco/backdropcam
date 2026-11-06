@@ -165,7 +165,8 @@ class VideoRecorder(
                 setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel51)
             }
         }
-        val codec = MediaCodec.createEncoderByType(videoMime)
+        val hwName = if (videoMime == MediaFormat.MIMETYPE_VIDEO_HEVC) hevcEncoder?.name else null
+        val codec = if (hwName != null) MediaCodec.createByCodecName(hwName) else MediaCodec.createEncoderByType(videoMime)
         try {
             codec.configure(vf, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         } catch (e: Exception) {
@@ -198,6 +199,7 @@ class VideoRecorder(
         videoCodec.release()
         audioCodec?.run { runCatching { stop() }; release() }
         audioRecord?.run { runCatching { stop() }; release() }
+        runCatching { inputSurface.release() }
         val ok = sink.stop()
         val why = failure ?: "Recording was too short"
 
@@ -448,17 +450,30 @@ class VideoRecorder(
 
         private fun avcCaps() = avcCapsCache
 
-        private val hevcCaps: MediaCodecInfo.VideoCapabilities? by lazy {
+        /**
+         * The phone's hardware H.265 encoder, if it has one. Software H.265 encoders are far too
+         * slow for live video on most phones (they make everything lag), so they are never used.
+         */
+        private val hevcEncoder: MediaCodecInfo? by lazy {
             try {
-                MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
-                    .firstOrNull { it.isEncoder && it.supportedTypes.any { t -> t.equals(MediaFormat.MIMETYPE_VIDEO_HEVC, true) } }
-                    ?.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_HEVC)?.videoCapabilities
+                MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.firstOrNull { info ->
+                    info.isEncoder && isHardware(info) &&
+                        info.supportedTypes.any { t -> t.equals(MediaFormat.MIMETYPE_VIDEO_HEVC, true) }
+                }
             } catch (e: Exception) {
                 null
             }
         }
 
-        fun hevcSupports(w: Int, h: Int) = hevcCaps?.isSizeSupported(w, h) == true
+        private fun isHardware(info: MediaCodecInfo): Boolean {
+            if (Build.VERSION.SDK_INT >= 29) return info.isHardwareAccelerated && !info.isSoftwareOnly
+            val n = info.name.lowercase(Locale.ROOT)
+            return !(n.startsWith("omx.google.") || n.startsWith("c2.android.") || n.contains(".sw."))
+        }
+
+        fun hevcSupports(w: Int, h: Int) = runCatching {
+            hevcEncoder?.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_HEVC)?.videoCapabilities?.isSizeSupported(w, h) == true
+        }.getOrDefault(false)
 
         /** True if the encoder can produce this size in either orientation. */
         fun isSizeSupported(w: Int, h: Int): Boolean {

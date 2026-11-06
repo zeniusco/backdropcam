@@ -287,7 +287,8 @@ class MainActivity : AppCompatActivity() {
                 if (settings.handsFree && recorder == null && countdown == null && !speaker.isSpeaking) coach.update(f)
             }
             framingWanted = settings.handsFree
-            onTooSlow = { easeForSlowPhone() }
+            onTooSlow = { fastPreview = true; easeForSlowPhone() }
+            fastPreview = settings.lowEndPhone || settings.safeMode
         }
         speaker = Speaker(this)
         coach = FramingCoach { speak(it) }
@@ -1682,8 +1683,35 @@ class MainActivity : AppCompatActivity() {
         root.setOnClickListener { if (controls.isShowing) controls.hide() else controls.show(3000) }
         video.setVideoURI(uri)
         dlg.setContentView(root)
-        dlg.setOnDismissListener { video.stopPlayback() }
+        dlg.setOnDismissListener {
+            video.stopPlayback()
+            pauseCameraForPlayback(false)
+        }
+        pauseCameraForPlayback(true)
         dlg.show()
+    }
+
+    private var playbackPauses = 0
+
+    /**
+     * While a recording is played back (or previewed for trimming) the camera, the cut-out and
+     * the voice listener are switched off: they would waste battery and memory, and hands-free
+     * could even hear "start" in the video's own sound.
+     */
+    private fun pauseCameraForPlayback(pause: Boolean) {
+        if (pause) {
+            if (playbackPauses++ > 0) return
+            voice.stop()
+            speaker.stop()
+            engine.setBackdropVideoPlaying(false)
+            runCatching { ProcessCameraProvider.getInstance(this).get().unbindAll() }
+            camera = null
+        } else {
+            if (playbackPauses == 0 || --playbackPauses > 0) return
+            engine.setBackdropVideoPlaying(true)
+            bindCamera()
+            startListening()
+        }
     }
 
     /** Removes a recording this app made (no permission prompt needed for our own files). */
@@ -1713,28 +1741,60 @@ class MainActivity : AppCompatActivity() {
                     val (a, z) = b.trimRange.values
                     b.trimLabel.text = "${fmt(a)}  to  ${fmt(z)}   (${fmt(z - a)})"
                 }
-                var frameJob = 0
-                fun showFrame(sec: Float) {
-                    val job = ++frameJob
-                    io.execute {
-                        val f = runCatching {
-                            MediaMetadataRetriever().run {
-                                setDataSource(this@MainActivity, uri)
-                                frameAt(this, (sec * 1_000_000).toLong(), 720).also { release() }
-                            }
-                        }.getOrNull()
-                        main.post { if (job == frameJob && f != null) b.trimFrame.setImageBitmap(f) }
+                // Live preview: the video jumps to whichever handle you drag; play shows the part
+                // you keep, from the start handle to the end handle.
+                val v = b.trimVideo
+                var ready = false
+                var playing = false
+                val stopAtEnd = object : Runnable {
+                    override fun run() {
+                        if (!playing) return
+                        val (_, z) = b.trimRange.values
+                        if (v.currentPosition >= (z * 1000).toInt()) {
+                            v.pause()
+                            playing = false
+                            b.trimPlay.visibility = View.VISIBLE
+                            b.trimPlay.setImageResource(R.drawable.ic_play_arrow)
+                        } else main.postDelayed(this, 50)
                     }
                 }
+                fun seek(sec: Float) {
+                    if (!ready) return
+                    if (playing) { v.pause(); playing = false; b.trimPlay.visibility = View.VISIBLE }
+                    v.seekTo((sec * 1000).toInt())
+                }
+                v.setVideoURI(uri)
+                v.setOnPreparedListener { mp ->
+                    mp.setVolume(1f, 1f)
+                    ready = true
+                    // Start and pause at once so the first picture is drawn.
+                    v.start(); v.pause(); v.seekTo(0)
+                }
+                v.setOnErrorListener { _, _, _ -> hint("Preview not available on this phone"); true }
+                b.trimPlay.setOnClickListener {
+                    if (!ready) return@setOnClickListener
+                    if (playing) {
+                        v.pause(); playing = false
+                        b.trimPlay.setImageResource(R.drawable.ic_play_arrow)
+                    } else {
+                        val (a2, z2) = b.trimRange.values
+                        val pos = v.currentPosition / 1000f
+                        if (pos < a2 || pos >= z2 - 0.1f) v.seekTo((a2 * 1000).toInt())
+                        v.start(); playing = true
+                        b.trimPlay.setImageResource(R.drawable.ic_pause)
+                        main.post(stopAtEnd)
+                    }
+                }
+                v.setOnClickListener { b.trimPlay.performClick() }
                 var lastA = 0f
                 b.trimRange.addOnChangeListener { slider, _, _ ->
                     label()
-                    val (a, z) = slider.values
-                    showFrame(if (a != lastA) a else z)
-                    lastA = a
+                    val (a2, z2) = slider.values
+                    seek(if (a2 != lastA) a2 else z2)
+                    lastA = a2
                 }
                 label()
-                showFrame(0f)
+                pauseCameraForPlayback(true)
                 MaterialAlertDialogBuilder(this)
                     .setTitle("Trim video")
                     .setView(b.root)
@@ -1759,6 +1819,12 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
                     .setNegativeButton("Cancel", null)
+                    .setOnDismissListener {
+                        playing = false
+                        main.removeCallbacks(stopAtEnd)
+                        v.stopPlayback()
+                        pauseCameraForPlayback(false)
+                    }
                     .show()
             }
         }
@@ -1934,7 +2000,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startListening() {
-        if (foreground && settings.handsFree && recorder == null && micMonitor == null) voice.start()
+        if (foreground && settings.handsFree && recorder == null && micMonitor == null && playbackPauses == 0) voice.start()
     }
 
     /** "start"/"action" while idle; "stop"/"cut" while recording or counting down. */

@@ -108,7 +108,14 @@ class CompositeEngine(context: Context) {
         var capturedMs = 0L
         var encode = false
         var ptsNs = 0L
+        var shown = false
     }
+
+    /**
+     * Weak phones: show each frame on screen at once with the newest cut-out available, instead
+     * of waiting for its own. The recording still waits, so the saved video stays exact.
+     */
+    @Volatile var fastPreview = false
 
     private val ring = ArrayList<Slot>()
     private var ringW = 0
@@ -688,6 +695,11 @@ class CompositeEngine(context: Context) {
         slot.capturedMs = now
         slot.encode = encoderSurface != EGL14.EGL_NO_SURFACE && !recordPaused()
         slot.ptsNs = if (slot.encode) recordPts() else 0L
+        slot.shown = false
+        if (fastPreview && (mode != MODE_NONE || framingWanted) && segmenter != null) {
+            showOnScreen(slot)
+            slot.shown = true
+        }
 
         // 2. Segment it, or show it straight away when no cut-out is needed.
         val wanted = (mode != MODE_NONE || framingWanted) && segmenter != null
@@ -914,19 +926,10 @@ class CompositeEngine(context: Context) {
         slot.pending = false
         makeCurrentAny()
         maybeSnapshot(slot)
-        makeCurrentAny()
-        if (mode == MODE_BLUR || (mode == MODE_IMAGE && !bgReady)) {
-            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, smallFbo)
-            // Flipped so the blur texture's rows run top to bottom, like the mask.
-            render(smallW, smallH, flipYC(), MODE_RAW, slot.tex)
-            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
-        }
-        if (previewSurface != EGL14.EGL_NO_SURFACE) {
-            val wFromOut = mul(rotC(-deviceRotation), scaleC(cropNx, cropNy))
-            focusMatrix = mul(mul(mul(stMatrix.copyOf(), fixMatrix), nFromW), wFromOut)
-            EGL14.eglMakeCurrent(display, previewSurface, previewSurface, eglContext)
-            render(previewW, previewH, wFromOut, mode, slot.tex)
-            EGL14.eglSwapBuffers(display, previewSurface)
+        if (!slot.shown) {
+            showOnScreen(slot)
+        } else if (slot.encode && (mode == MODE_BLUR || (mode == MODE_IMAGE && !bgReady))) {
+            updateBlurSource(slot)
         }
         if (slot.encode && encoderSurface != EGL14.EGL_NO_SURFACE) {
             EGL14.eglMakeCurrent(display, encoderSurface, encoderSurface, eglContext)
@@ -934,6 +937,28 @@ class CompositeEngine(context: Context) {
             render(encoderW, encoderH, scaleC(cx, cy), mode, slot.tex)
             EGLExt.eglPresentationTimeANDROID(display, encoderSurface, slot.ptsNs)
             EGL14.eglSwapBuffers(display, encoderSurface)
+        }
+        makeCurrentAny()
+    }
+
+    private fun updateBlurSource(slot: Slot) {
+        makeCurrentAny()
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, smallFbo)
+        // Flipped so the blur texture's rows run top to bottom, like the mask.
+        render(smallW, smallH, flipYC(), MODE_RAW, slot.tex)
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+    }
+
+    /** Draws [slot] on the phone screen (with the mask available now). */
+    private fun showOnScreen(slot: Slot) {
+        makeCurrentAny()
+        if (mode == MODE_BLUR || (mode == MODE_IMAGE && !bgReady)) updateBlurSource(slot)
+        if (previewSurface != EGL14.EGL_NO_SURFACE) {
+            val wFromOut = mul(rotC(-deviceRotation), scaleC(cropNx, cropNy))
+            focusMatrix = mul(mul(mul(stMatrix.copyOf(), fixMatrix), nFromW), wFromOut)
+            EGL14.eglMakeCurrent(display, previewSurface, previewSurface, eglContext)
+            render(previewW, previewH, wFromOut, mode, slot.tex)
+            EGL14.eglSwapBuffers(display, previewSurface)
         }
         makeCurrentAny()
     }
