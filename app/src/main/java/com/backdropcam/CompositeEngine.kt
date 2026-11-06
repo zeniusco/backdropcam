@@ -167,6 +167,7 @@ class CompositeEngine(context: Context) {
     /** Crop to segment next, decided from the last mask (null = whole picture). */
     @Volatile private var nextRoi: FloatArray? = null
     private var lastRoi: FloatArray? = null
+    private var lastFullRoi: FloatArray? = null
 
     /** Set true to keep segmenting (for framing guidance) even with no background effect. */
     @Volatile var framingWanted = false
@@ -706,9 +707,10 @@ class CompositeEngine(context: Context) {
         val crop = nextRoi
         val whole = crop == null || !fullReady || segCount++ % 4 == 0L
         val roi = if (whole) fullRoi(ww, wh) else crop!!
-        // Smoothing only makes sense between masks of the same region.
-        val roiChanged = whole || lastRoi?.contentEquals(roi) != true
-        if (!whole) lastRoi = roi
+        // Smoothing only makes sense between masks of the same region; the whole picture and the
+        // crop each keep their own history.
+        val roiChanged = if (whole) lastFullRoi?.contentEquals(roi) != true else lastRoi?.contentEquals(roi) != true
+        if (whole) lastFullRoi = roi else lastRoi = roi
 
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, roiFbo)
         // Output row 0 = top of the crop, so the read-back Bitmap is upright.
@@ -732,7 +734,7 @@ class CompositeEngine(context: Context) {
                 var mask: PersonSegmenter.Mask? = null
                 try {
                     val t0 = SystemClock.uptimeMillis()
-                    mask = segmenter?.segment(bmp, resetSmoothing = roiChanged)
+                    mask = segmenter?.segment(bmp, resetSmoothing = roiChanged, stream = if (whole) 0 else 1)
                     noteSegmentationTime(SystemClock.uptimeMillis() - t0)
                     if (mask != null) {
                         // A whole-picture pass decides the crop afresh (it may have drifted);
@@ -1013,6 +1015,7 @@ class CompositeEngine(context: Context) {
         maskGen++
         nextRoi = null
         lastRoi = null
+        lastFullRoi = null
         segmenter?.reset()
     }
 
@@ -1451,7 +1454,9 @@ void main() {
             vec3 fb = F - B;
             float len2 = dot(fb, fb);
             float aCol = clamp(dot(cam - B, fb) / max(len2, 0.0001), 0.0, 1.0);
-            float conf = step(0.5, wf) * step(0.5, wb) * smoothstep(0.01, 0.05, len2);
+            // Only trust the colours where you and the background clearly differ; on weak contrast
+            // camera noise would make the edge shimmer from frame to frame.
+            float conf = step(0.5, wf) * step(0.5, wb) * smoothstep(0.02, 0.08, len2);
             m = mix(mBil, aCol, conf * 0.85);
         } else {
             m = m0;

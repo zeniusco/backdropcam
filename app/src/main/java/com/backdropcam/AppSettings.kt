@@ -74,6 +74,25 @@ class AppSettings(context: Context) {
         get() = p.getBoolean("slowModelHandled", false)
         set(v) = p.edit().putBoolean("slowModelHandled", v).apply()
 
+    /** True while the camera screen is open; still true at the next start means the app crashed. */
+    var sessionOpen: Boolean
+        get() = p.getBoolean("sessionOpen", false)
+        set(v) { p.edit().putBoolean("sessionOpen", v).commit() }
+
+    /** Lightest settings, after a crash: 720p, fast model on the processor. */
+    var safeMode: Boolean
+        get() = p.getBoolean("safeMode", false)
+        set(v) = p.edit().putBoolean("safeMode", v).apply()
+
+    fun enterSafeMode() {
+        p.edit()
+            .putBoolean("safeMode", true)
+            .putString("quality", "720")
+            .putBoolean("hq", false)
+            .putBoolean("sessionOpen", false)
+            .commit()
+    }
+
     var firstRun: Boolean
         get() = p.getBoolean("firstRun", true)
         set(v) = p.edit().putBoolean("firstRun", v).apply()
@@ -157,23 +176,6 @@ class AppSettings(context: Context) {
     var smallFiles: Boolean
         get() = p.getBoolean("smallFiles", true)
         set(v) = p.edit().putBoolean("smallFiles", v).apply()
-
-    // ---------------------------------------------------------------- captions
-
-    /** Live captions drawn into the video. */
-    var captionsOn: Boolean
-        get() = p.getBoolean("captionsOn", false)
-        set(v) = p.edit().putBoolean("captionsOn", v).apply()
-
-    /** Save an .srt subtitle file next to each recording. */
-    var srtOn: Boolean
-        get() = p.getBoolean("srtOn", false)
-        set(v) = p.edit().putBoolean("srtOn", v).apply()
-
-    /** Teleprompter scrolls by following your voice instead of a fixed speed. */
-    var teleFollow: Boolean
-        get() = p.getBoolean("teleFollow", true)
-        set(v) = p.edit().putBoolean("teleFollow", v).apply()
 
     // ---------------------------------------------------------------- music
 

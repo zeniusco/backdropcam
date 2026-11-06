@@ -17,13 +17,7 @@
             android:layout_height="wrap_content"
             android:text="Show teleprompter (front camera)" />
 
-        <com.google.android.material.materialswitch.MaterialSwitch
-            android:id="@+id/followSwitch"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Follow my voice (scrolls as I speak, while recording)" />
-
-        <TextView style="@style/SheetLabel" android:text="Scroll speed (when not following your voice)" />
+        <TextView style="@style/SheetLabel" android:text="Scroll speed" />
 
         <com.google.android.material.slider.Slider
             android:id="@+id/speedSlider"

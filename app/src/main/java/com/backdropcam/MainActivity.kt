@@ -122,7 +122,6 @@ class MainActivity : AppCompatActivity() {
     private var deviceRotation = 0
     private var cropX = 1f
     private var cropY = 1f
-    private var noWideHintShown = false
     private var foreground = false
 
     // Recording
@@ -267,6 +266,9 @@ class MainActivity : AppCompatActivity() {
         setContentView(ui.root)
 
         settings = AppSettings(this)
+        CrashGuard.install(this)
+        val crashedLastTime = settings.sessionOpen
+        if (crashedLastTime) settings.enterSafeMode()
         backdrops = BackdropStore(this)
         scripts = ScriptStore(this)
         brandKit = BrandKit(this, settings)
@@ -316,6 +318,7 @@ class MainActivity : AppCompatActivity() {
         if (Build.VERSION.SDK_INT <= 28) needed += Manifest.permission.WRITE_EXTERNAL_STORAGE
         if (needed.all { granted(it) }) bindCamera() else permissionLauncher.launch(needed.toTypedArray())
 
+        if (crashedLastTime) main.postDelayed({ showCrashNotice() }, 800)
         if (settings.firstRun) {
             settings.firstRun = false
             main.postDelayed({
@@ -358,6 +361,31 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** After a crash: the app restarts in lighter settings; offer to share the error report. */
+    private fun showCrashNotice() {
+        val report = CrashGuard.lastReport(this)
+        val b = MaterialAlertDialogBuilder(this)
+            .setTitle("BackdropCam closed unexpectedly")
+            .setMessage(
+                "It has restarted with lighter settings for this phone: 720p, Fast cut-out, and the " +
+                    "cut-out running on the processor instead of the graphics chip. You can raise them again in Settings." +
+                    if (report != null) "\n\nSending the error report helps fix the cause." else ""
+            )
+            .setPositiveButton("OK", null)
+        if (report != null) b.setNeutralButton("Send report") { _, _ ->
+            startActivitySafe(
+                Intent.createChooser(
+                    Intent(Intent.ACTION_SEND).setType("text/plain")
+                        .putExtra(Intent.EXTRA_SUBJECT, "BackdropCam error report")
+                        .putExtra(Intent.EXTRA_TEXT, report),
+                    "Send report"
+                )
+            )
+        }
+        b.show()
+        CrashGuard.clear(this)
+    }
+
     /** Long 4K recordings make phones hot; say so before the phone itself slows down. */
     private fun watchTemperature() {
         if (Build.VERSION.SDK_INT < 29) return
@@ -383,6 +411,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        settings.sessionOpen = true
         foreground = true
         engine.setBackdropVideoPlaying(true)
         if (orientationListener.canDetectOrientation()) orientationListener.enable()
@@ -394,6 +423,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
+        settings.sessionOpen = false
         foreground = false
         engine.setBackdropVideoPlaying(false)
         orientationListener.disable()
@@ -473,10 +503,7 @@ class MainActivity : AppCompatActivity() {
         ui.remoteBtn.setOnClickListener { showRemoteSheet() }
         ui.teleBtn.setOnClickListener { showScriptsSheet() }
         // Tap the script to pause / resume scrolling (also handy for rehearsing).
-        val toggleTele = View.OnClickListener {
-            if (follower != null) hint("The script follows your voice while recording")
-            else teleRunning = !teleRunning
-        }
+        val toggleTele = View.OnClickListener { teleRunning = !teleRunning }
         ui.teleBox.setOnClickListener(toggleTele)
         ui.teleText.setOnClickListener(toggleTele)
         ui.recordBtn.setOnClickListener { onRecordPressed() }
@@ -641,9 +668,6 @@ class MainActivity : AppCompatActivity() {
                     highlightLens(1)
                 }
                 updateLensRowVisibility()
-            } else if (settings.wideStart && !noWideHintShown) {
-                noWideHintShown = true
-                hint("This phone does not let apps use its ultra-wide lens")
             }
         }
         rotateControls(deviceRotation)
@@ -860,7 +884,7 @@ class MainActivity : AppCompatActivity() {
         val hq = settings.highQualityCutout
         io.execute {
             try {
-                engine.setSegmenter(PersonSegmenter(this, hq))
+                engine.setSegmenter(PersonSegmenter(this, hq, allowGpu = !settings.safeMode))
             } catch (e: Exception) {
                 main.post { hint("Could not load the cut-out model") }
             }
@@ -1236,25 +1260,6 @@ class MainActivity : AppCompatActivity() {
         val listenForStop = settings.handsFree && audio
         if (settings.handsFree && !audio) hint("Without sound, say nothing: tap the button or press a volume key to stop")
 
-        // Captions / subtitle file / voice-following teleprompter all read the recording's sound.
-        val wantText = audio && (settings.captionsOn || settings.srtOn || followActive())
-        var tr: LiveTranscriber? = null
-        if (wantText) {
-            val r = voice.newTranscriptionRecognizer()
-            if (r == null) {
-                hint("Captions are still getting ready. They will work on your next recording.")
-                loadVoice()
-            } else {
-                tr = LiveTranscriber(
-                    r,
-                    onCaption = { if (settings.captionsOn) { captionText = it; updateOverlay() } },
-                    onWords = { followScript(it) },
-                )
-            }
-        }
-        transcriber = tr
-        follower = if (followActive()) settings.teleScript?.let { scripts.load(it) }?.let { ScriptFollower(it.body) } else null
-
         micMonitor?.stop()
         micMonitor = null
         voice.stop() // free the microphone for the recorder
@@ -1272,10 +1277,7 @@ class MainActivity : AppCompatActivity() {
                     main.post { ui.levelBar.progress = (level * 100).toInt() }
                 },
                 // In hands-free mode the recording's own sound is checked for "stop".
-                onPcm = if (listenForStop || tr != null) { pcm: ShortArray, n: Int, t: Long ->
-                    if (listenForStop) voice.feed48k(pcm, n, t)
-                    tr?.feed48k(pcm, n, t)
-                } else null,
+                onPcm = if (listenForStop) { pcm: ShortArray, n: Int, t: Long -> voice.feed48k(pcm, n, t) } else null,
                 music = if (audio && settings.musicOn && musicFile.exists()) MusicSource(musicFile) else null,
                 musicVolume = { settings.musicVolume },
                 musicDuck = { settings.musicDuck },
@@ -1305,7 +1307,7 @@ class MainActivity : AppCompatActivity() {
         ui.pauseBtn.setImageResource(R.drawable.ic_pause)
         if (ui.teleBox.visibility == View.VISIBLE) {
             ui.teleScroll.scrollTo(0, 0)
-            teleRunning = follower == null // with voice-following, your speech moves the script
+            teleRunning = true
         }
         setControlsEnabled(false)
         updateMicUi()
@@ -1341,7 +1343,7 @@ class MainActivity : AppCompatActivity() {
             rec.resume()
             voice.reset() // word timings restart with the resumed recording clock
             recDotBlink?.resume()
-            if (ui.teleBox.visibility == View.VISIBLE && follower == null) teleRunning = true
+            if (ui.teleBox.visibility == View.VISIBLE) teleRunning = true
             ui.pauseBtn.setImageResource(R.drawable.ic_pause)
         } else {
             rec.pause()
@@ -1355,12 +1357,8 @@ class MainActivity : AppCompatActivity() {
     private fun stopRecording() {
         val rec = recorder ?: return
         recorder = null
-        val tr = transcriber
-        transcriber = null
-        follower = null
-        if (introAlpha > 0f || captionText.isNotEmpty()) {
+        if (introAlpha > 0f) {
             introAlpha = 0f
-            captionText = ""
             updateOverlay()
         }
         setShutter(false)
@@ -1377,17 +1375,8 @@ class MainActivity : AppCompatActivity() {
             io.execute {
                 try {
                     val uri = rec.finish()
-                    var srt: String? = null
-                    if (tr != null) {
-                        val words = runCatching { tr.finish() }.getOrDefault(emptyList())
-                        if (settings.srtOn) srt = runCatching { SubtitleWriter.save(this, rec.displayName, words) }.getOrNull()
-                    }
-                    main.post {
-                        onVideoSaved(uri, rec)
-                        if (srt != null) hint("Subtitles saved: $srt")
-                    }
+                    main.post { onVideoSaved(uri, rec) }
                 } catch (e: Exception) {
-                    runCatching { tr?.finish() }
                     main.post {
                         hint("Could not save the video: ${e.message}")
                         if (settings.handsFree) speak("Sorry, saving failed.")
@@ -1536,18 +1525,6 @@ class MainActivity : AppCompatActivity() {
         b.softnessSlider.addOnChangeListener { _, v, _ ->
             settings.softness = v
             applyEngineOptions()
-        }
-
-        // Captions
-        b.captionsSwitch.isChecked = settings.captionsOn
-        b.captionsSwitch.setOnCheckedChangeListener { _, on ->
-            settings.captionsOn = on
-            if (on) loadVoice()
-        }
-        b.srtSwitch.isChecked = settings.srtOn
-        b.srtSwitch.setOnCheckedChangeListener { _, on ->
-            settings.srtOn = on
-            if (on) loadVoice()
         }
 
         b.autoUploadSwitch.isChecked = settings.autoUpload
@@ -1837,24 +1814,8 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** The offline speech model is needed by hands-free, captions and the voice-following teleprompter. */
-    private fun needsSpeechModel() =
-        settings.handsFree || settings.captionsOn || settings.srtOn ||
-            (settings.teleFollow && settings.teleOn && settings.teleScript != null && settings.frontCamera)
-
-    private var transcriber: LiveTranscriber? = null
-    private var follower: ScriptFollower? = null
-
-    private fun followActive() = settings.teleFollow && ui.teleBox.visibility == View.VISIBLE
-
-    /** Moves the teleprompter so the line being spoken sits near the top of the box. */
-    private fun followScript(words: List<String>) {
-        val offset = follower?.advance(words) ?: return
-        val layout = ui.teleText.layout ?: return
-        val line = layout.getLineForOffset(offset)
-        val y = ui.teleText.paddingTop + layout.getLineTop(line) - (ui.teleScroll.height * 0.3f).toInt()
-        ui.teleScroll.smoothScrollTo(0, y.coerceAtLeast(0))
-    }
+    /** The offline speech model (about 100 MB of memory) is only loaded for hands-free mode. */
+    private fun needsSpeechModel() = settings.handsFree
 
     /** Loads the offline speech model (about 100 MB of memory), so only while hands-free is on. */
     private fun loadVoice() {
@@ -1933,7 +1894,6 @@ class MainActivity : AppCompatActivity() {
         val show = front && settings.teleOn && script != null && script.body.isNotBlank() && deviceRotation % 180 == 0
         ui.teleBox.visibility = if (show) View.VISIBLE else View.GONE
         if (!show) teleRunning = false
-        if (show && settings.teleFollow) loadVoice()
         if (script != null) ui.teleText.text = script.body
         ui.teleText.textSize = settings.teleSize.toFloat()
         setActive(ui.teleBtn, show)
@@ -1945,11 +1905,6 @@ class MainActivity : AppCompatActivity() {
         dlg.setContentView(b.root)
         b.teleSwitch.isChecked = settings.teleOn
         b.teleSwitch.setOnCheckedChangeListener { _, on -> settings.teleOn = on; updateTeleUi() }
-        b.followSwitch.isChecked = settings.teleFollow
-        b.followSwitch.setOnCheckedChangeListener { _, on ->
-            settings.teleFollow = on
-            if (on) loadVoice()
-        }
         b.speedSlider.value = settings.teleSpeed.coerceIn(1, 10).toFloat()
         b.speedSlider.addOnChangeListener { _, v, _ -> settings.teleSpeed = v.toInt() }
         b.sizeSlider.value = (settings.teleSize.coerceIn(18, 48) / 2 * 2).toFloat()
@@ -2262,7 +2217,7 @@ class MainActivity : AppCompatActivity() {
             introTitle = settings.introTitle,
             introSubtitle = "",
             introAlpha = introAlpha,
-            caption = captionText,
+            caption = "",
         )
         // Coalesce: only the newest state is drawn.
         if (overlayDirty) return
@@ -2274,8 +2229,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** Text shown as live captions (set by the captions feature). */
-    private var captionText = ""
 
     /** Intro card: fades in, holds, fades out over the first ~3 seconds of a recording. */
     private fun tickIntro() {
