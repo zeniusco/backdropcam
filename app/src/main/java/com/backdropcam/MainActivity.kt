@@ -1136,7 +1136,10 @@ class MainActivity : AppCompatActivity() {
                 this, size.width, size.height, audio,
                 gain = { micGain },
                 muted = { micMuted },
-                onLevel = { level -> main.post { ui.levelBar.progress = (level * 100).toInt() } },
+                onLevel = { level ->
+                    lastMicLevel = level
+                    main.post { ui.levelBar.progress = (level * 100).toInt() }
+                },
                 // In hands-free mode the recording's own sound is checked for "stop".
                 onPcm = if (listenForStop || tr != null) { pcm: ShortArray, n: Int, t: Long ->
                     if (listenForStop) voice.feed48k(pcm, n, t)
@@ -2015,6 +2018,7 @@ class MainActivity : AppCompatActivity() {
 
     private var remote: RemoteServer? = null
     private val remoteExecutor = Executors.newSingleThreadExecutor()
+    @Volatile private var lastMicLevel = 0f
 
     private fun startRemote(): RemoteServer? {
         remote?.let { return it }
@@ -2026,6 +2030,10 @@ class MainActivity : AppCompatActivity() {
                     paused = rec?.paused == true,
                     seconds = (rec?.ptsNs() ?: 0L) / 1_000_000_000L,
                     countdown = countdown != null,
+                    limit = settings.autoStop,
+                    level = if (rec != null && !rec.paused) lastMicLevel else 0f,
+                    quality = when (settings.quality) { "1080" -> "1080p"; "720" -> "720p"; else -> "Max quality" },
+                    camera = if (settings.frontCamera) "Front camera" else "Back camera",
                 )
             },
             onCommand = { a ->
@@ -2040,7 +2048,10 @@ class MainActivity : AppCompatActivity() {
         if (!server.start()) return null
         remote = server
         engine.snapshotWanted = { server.wantsFrames }
-        engine.snapshotListener = { bmp ->
+        engine.snapshotListener = listener@{ bmp ->
+            // Skip this picture if the last one is still being compressed, so the laptop view
+            // never falls behind the camera.
+            if (server.busy) return@listener
             val copy = bmp.copy(Bitmap.Config.ARGB_8888, false)
             remoteExecutor.execute {
                 server.pushFrame(copy)

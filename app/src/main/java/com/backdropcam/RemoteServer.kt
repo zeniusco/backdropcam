@@ -22,13 +22,28 @@ class RemoteServer(
     private val status: () -> Status,
     private val onCommand: (String) -> Unit,
 ) {
-    class Status(val recording: Boolean, val paused: Boolean, val seconds: Long, val countdown: Boolean)
+    class Status(
+        val recording: Boolean,
+        val paused: Boolean,
+        val seconds: Long,
+        val countdown: Boolean,
+        /** Auto-stop length in seconds, 0 = off. */
+        val limit: Int = 0,
+        /** Microphone level 0..1 (while recording). */
+        val level: Float = 0f,
+        val quality: String = "",
+        val camera: String = "",
+    )
 
     val key: String = (1..6).map { "abcdefghjkmnpqrstuvwxyz23456789"[Random.nextInt(31)] }.joinToString("")
     @Volatile var port = 0; private set
     @Volatile private var running = false
     private var server: ServerSocket? = null
     @Volatile private var latestJpeg: ByteArray? = null
+    private val frameLock = Object()
+    @Volatile private var encoding = false
+    /** True while the last picture is still being compressed; the caller then skips a frame. */
+    val busy: Boolean get() = encoding
     @Volatile var viewers = 0; private set
 
     /** True while someone has the live picture open (so frames only get made when needed). */
@@ -64,9 +79,15 @@ class RemoteServer(
 
     /** Called with each new preview picture (compressed here, off the GL thread by the caller). */
     fun pushFrame(bmp: Bitmap) {
-        val out = ByteArrayOutputStream(64 * 1024)
-        bmp.compress(Bitmap.CompressFormat.JPEG, 70, out)
-        latestJpeg = out.toByteArray()
+        encoding = true
+        try {
+            val out = ByteArrayOutputStream(128 * 1024)
+            bmp.compress(Bitmap.CompressFormat.JPEG, 80, out)
+            latestJpeg = out.toByteArray()
+            synchronized(frameLock) { frameLock.notifyAll() }
+        } finally {
+            encoding = false
+        }
     }
 
     /** http://ip:port/?k=key for every local network address (Wi-Fi or this phone's hotspot). */
@@ -76,6 +97,8 @@ class RemoteServer(
         socket.use { sock ->
             try {
                 sock.soTimeout = 15_000
+                sock.tcpNoDelay = true
+                runCatching { sock.sendBufferSize = 512 * 1024 }
                 val reader = BufferedReader(InputStreamReader(sock.getInputStream()))
                 val requestLine = reader.readLine() ?: return
                 while (true) { val l = reader.readLine() ?: break; if (l.isEmpty()) break } // skip headers
@@ -91,7 +114,9 @@ class RemoteServer(
                     "/status" -> {
                         val st = status()
                         send(out, 200, "application/json",
-                            """{"recording":${st.recording},"paused":${st.paused},"seconds":${st.seconds},"countdown":${st.countdown}}""".toByteArray())
+                            ("""{"recording":${st.recording},"paused":${st.paused},"seconds":${st.seconds},""" +
+                                """"countdown":${st.countdown},"limit":${st.limit},"level":${"%.3f".format(java.util.Locale.US, st.level)},""" +
+                                """"quality":"${st.quality}","camera":"${st.camera}"}""").toByteArray())
                     }
                     "/cmd" -> {
                         val a = query["a"] ?: ""
@@ -107,7 +132,7 @@ class RemoteServer(
         }
     }
 
-    /** MJPEG: a never-ending multipart response, one JPEG part per picture (~8 per second). */
+    /** MJPEG: a never-ending multipart response, one JPEG part per picture (up to 20 per second). */
     private fun stream(out: OutputStream) {
         viewers++
         try {
@@ -123,7 +148,8 @@ class RemoteServer(
                     out.write("\r\n".toByteArray())
                     out.flush()
                 }
-                Thread.sleep(60)
+                // Wake as soon as the next picture is ready instead of polling.
+                synchronized(frameLock) { if (latestJpeg === last) frameLock.wait(200) }
             }
         } finally {
             viewers--
@@ -139,33 +165,70 @@ class RemoteServer(
 
     private fun page() = """<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>BackdropCam remote</title>
+<title>BackdropCam monitor</title>
 <style>
 :root{color-scheme:dark}
-body{margin:0;background:#0d0d10;color:#fff;font-family:system-ui,sans-serif;display:flex;flex-direction:column;align-items:center;min-height:100vh}
-img{max-width:100%;max-height:72vh;margin-top:12px;border-radius:14px;background:#000}
-.row{display:flex;gap:14px;margin:18px 16px;align-items:center}
-button{border:0;border-radius:999px;font-size:17px;font-weight:700;padding:16px 26px;color:#fff;background:#3a3a42}
+*{box-sizing:border-box}
+body{margin:0;background:#0d0d10;color:#fff;font-family:system-ui,"Segoe UI",sans-serif;display:flex;flex-direction:column;align-items:center;min-height:100vh;padding:12px 16px}
+#wrap{position:relative;display:inline-block;max-width:100%}
+#cam{display:block;max-width:100%;max-height:calc(100vh - 150px);border-radius:14px;background:#000}
+#wrap:fullscreen{display:flex;align-items:center;justify-content:center;background:#000;width:100vw;height:100vh}
+#wrap:fullscreen #cam{max-height:100vh;border-radius:0}
+.pill{position:absolute;top:12px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,.55);border-radius:999px;padding:6px 14px;font-size:17px;font-weight:700;font-variant-numeric:tabular-nums;display:flex;align-items:center;gap:8px;white-space:nowrap}
+.dot{width:11px;height:11px;border-radius:50%;background:#888}
+.rec .dot{background:#ff3b30;animation:b 1s infinite}
+.paused .dot{background:#ffcc00;animation:none}
+@keyframes b{50%{opacity:.3}}
+#info{position:absolute;bottom:10px;left:12px;font-size:12px;opacity:.75;background:rgba(0,0,0,.45);padding:3px 8px;border-radius:8px}
+#meter{position:absolute;right:12px;bottom:12px;top:56px;width:8px;border-radius:4px;background:rgba(255,255,255,.18);overflow:hidden}
+#lvl{position:absolute;bottom:0;left:0;right:0;height:0;background:#34c759;transition:height .1s}
+.row{display:flex;gap:12px;margin:14px 0 6px;align-items:center;flex-wrap:wrap;justify-content:center}
+button{border:0;border-radius:999px;font-size:17px;font-weight:700;padding:14px 24px;color:#fff;background:#3a3a42;cursor:pointer}
+button:disabled{opacity:.4;cursor:default}
 #rec{background:#ff3b30;min-width:120px}
-#st{font-size:16px;font-variant-numeric:tabular-nums;opacity:.85}
+#keys{font-size:12px;opacity:.55}
 </style></head><body>
-<img src="/stream?k=$key" alt="Live picture">
-<div class="row"><button id="rec">Record</button><button id="pause" disabled>Pause</button></div>
-<div id="st">Connected</div>
+<div id="wrap">
+ <img id="cam" src="/stream?k=$key" alt="Live picture, as it will be recorded">
+ <div class="pill" id="pill"><span class="dot"></span><span id="st">Connecting</span></div>
+ <div id="meter"><div id="lvl"></div></div>
+ <div id="info"></div>
+</div>
+<div class="row"><button id="rec">Record</button><button id="pause" disabled>Pause</button><button id="fs">Full screen</button></div>
+<div id="keys">Keys: Space record or stop, P pause, F full screen</div>
 <script>
-const k="$key";
+const k="$key", ${'$'}=id=>document.getElementById(id);
 const cmd=a=>fetch('/cmd?a='+a+'&k='+k);
-document.getElementById('rec').onclick=()=>cmd('record');
-document.getElementById('pause').onclick=()=>cmd('pause');
+const t=s=>String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0');
+${'$'}('rec').onclick=()=>cmd('record');
+${'$'}('pause').onclick=()=>cmd('pause');
+const fs=()=>document.fullscreenElement?document.exitFullscreen():${'$'}('wrap').requestFullscreen();
+${'$'}('fs').onclick=fs;
+document.addEventListener('keydown',e=>{
+ if(e.code==='Space'){e.preventDefault();cmd('record')}
+ else if(e.key==='p'||e.key==='P')cmd('pause');
+ else if(e.key==='f'||e.key==='F')fs();
+});
+// Reconnect the picture if the Wi-Fi drops for a moment.
+${'$'}('cam').onerror=()=>setTimeout(()=>{${'$'}('cam').src='/stream?k='+k+'&t='+Date.now()},1000);
 async function poll(){
  try{
   const s=await (await fetch('/status?k='+k)).json();
-  const m=String(Math.floor(s.seconds/60)).padStart(2,'0'), sec=String(s.seconds%60).padStart(2,'0');
-  document.getElementById('rec').textContent = s.recording ? 'Stop' : (s.countdown ? 'Cancel' : 'Record');
-  const p=document.getElementById('pause'); p.disabled=!s.recording; p.textContent = s.paused ? 'Resume' : 'Pause';
-  document.getElementById('st').textContent = s.recording ? ((s.paused?'Paused ':'Recording ')+m+':'+sec) : (s.countdown?'Starting…':'Ready');
- }catch(e){document.getElementById('st').textContent='Reconnecting…'}
- setTimeout(poll,700);
+  ${'$'}('rec').textContent = s.recording ? 'Stop' : (s.countdown ? 'Cancel' : 'Record');
+  const p=${'$'}('pause'); p.disabled=!s.recording; p.textContent = s.paused ? 'Resume' : 'Pause';
+  let txt;
+  if(s.recording){
+   txt=(s.paused?'Paused ':'')+t(s.seconds);
+   if(s.limit>0) txt+=' / '+t(s.limit)+'  ('+t(Math.max(0,s.limit-s.seconds))+' left)';
+  } else txt = s.countdown ? 'Starting' : 'Ready';
+  ${'$'}('st').textContent=txt;
+  ${'$'}('pill').className='pill'+(s.recording?(s.paused?' paused':' rec'):'');
+  const lv=Math.min(1,s.recording?s.level:0);
+  ${'$'}('lvl').style.height=(lv*100)+'%';
+  ${'$'}('lvl').style.background=lv>0.9?'#ff3b30':(lv>0.7?'#ffcc00':'#34c759');
+  ${'$'}('info').textContent=[s.camera,s.quality,s.limit>0?'auto-stop '+t(s.limit):''].filter(Boolean).join('  ·  ');
+ }catch(e){${'$'}('st').textContent='Reconnecting'}
+ setTimeout(poll,250);
 }
 poll();
 </script></body></html>"""

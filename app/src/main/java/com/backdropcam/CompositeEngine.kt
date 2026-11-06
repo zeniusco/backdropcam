@@ -445,12 +445,16 @@ class CompositeEngine(context: Context) {
     }
 
     /**
-     * Receives a small upright copy of the finished picture about 8 times a second, for the
+     * Receives an upright copy of the finished picture up to 20 times a second, for the
      * remote viewer. Called on the GL thread; the bitmap is reused, so copy or compress at once.
      */
     @Volatile var snapshotListener: ((Bitmap) -> Unit)? = null
     /** Snapshots are only made while this says someone is watching. */
     @Volatile var snapshotWanted: () -> Boolean = { false }
+    /** Longest side of the remote picture, in pixels. */
+    @Volatile var snapshotSize = 960
+    /** Shortest time between remote pictures (50 ms = 20 per second). */
+    @Volatile var snapshotIntervalMs = 50L
     private var snapFbo = 0
     private var snapTex = 0
     private var snapW = 0
@@ -463,13 +467,13 @@ class CompositeEngine(context: Context) {
         val listener = snapshotListener ?: return
         if (!snapshotWanted()) return
         val now = SystemClock.uptimeMillis()
-        if (now - lastSnapMs < 120) return
+        if (now - lastSnapMs < snapshotIntervalMs) return
         lastSnapMs = now
         val (ww, wh) = worldSize()
         val (cx, cy) = cropW()
         if (ww == 0 || wh == 0) return
         val vw = ww * cx; val vh = wh * cy
-        val s = 640f / max(vw, vh)
+        val s = snapshotSize.toFloat() / max(vw, vh)
         val w = ((vw * s).roundToInt() / 2) * 2
         val h = ((vh * s).roundToInt() / 2) * 2
         if (w != snapW || h != snapH) {
