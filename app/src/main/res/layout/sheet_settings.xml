@@ -244,6 +244,13 @@
         <TextView style="@style/SheetSection" android:text="Sharing" />
 
         <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/driveInAppSwitch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="Upload inside the app and copy the link automatically (needs the app registered with Google; off = use the Drive app)" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
             android:id="@+id/autoUploadSwitch"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

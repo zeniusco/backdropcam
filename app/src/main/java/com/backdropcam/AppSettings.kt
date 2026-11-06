@@ -34,6 +34,14 @@ class AppSettings(context: Context) {
         get() = p.getBoolean("mirror", true)
         set(v) = p.edit().putBoolean("mirror", v).apply()
 
+    /**
+     * Upload inside the app (needs the app registered with Google). Off = hand the video to the
+     * Google Drive app, which works on every phone with no setup.
+     */
+    var driveInApp: Boolean
+        get() = p.getBoolean("driveInApp", false)
+        set(v) = p.edit().putBoolean("driveInApp", v).apply()
+
     var autoUpload: Boolean
         get() = p.getBoolean("autoUpload", false)
         set(v) = p.edit().putBoolean("autoUpload", v).apply()

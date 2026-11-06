@@ -69,6 +69,28 @@ object CameraLenses {
     }
 
     /**
+     * Reports how hard the camera has to work to see: sensor gain (ISO) times exposure time.
+     * This measures the room's light, not how light or dark the person's skin is.
+     * [onExposure] gets ISO x seconds, e.g. ~5 in a bright room, 40+ when it is too dark.
+     */
+    @androidx.annotation.OptIn(markerClass = [ExperimentalCamera2Interop::class])
+    fun watchExposure(builder: Preview.Builder, onExposure: (Float) -> Unit) {
+        Camera2Interop.Extender(builder).setSessionCaptureCallback(object : android.hardware.camera2.CameraCaptureSession.CaptureCallback() {
+            private var n = 0
+            override fun onCaptureCompleted(
+                session: android.hardware.camera2.CameraCaptureSession,
+                request: CaptureRequest,
+                result: android.hardware.camera2.TotalCaptureResult,
+            ) {
+                if (n++ % 10 != 0) return // a few times a second is plenty
+                val iso = result.get(android.hardware.camera2.CaptureResult.SENSOR_SENSITIVITY) ?: return
+                val expNs = result.get(android.hardware.camera2.CaptureResult.SENSOR_EXPOSURE_TIME) ?: return
+                onExposure(iso * (expNs / 1_000_000_000f))
+            }
+        })
+    }
+
+    /**
      * The largest camera mode of the wanted shape (16:9 or 4:3), up to [cap] pixels on the long
      * side, that this phone's video encoder can also record.
      */

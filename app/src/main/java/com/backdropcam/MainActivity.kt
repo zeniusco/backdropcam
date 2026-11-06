@@ -391,6 +391,28 @@ class MainActivity : AppCompatActivity() {
         CrashGuard.clear(this)
     }
 
+    // ---- light check: "too dark" comes from the camera's exposure (ISO x time), which measures the
+    // room's light. The person's skin tone does not change it, so it cannot fire falsely for
+    // darker-skinned people the way a "how bright is the face" check would.
+    private var exposureAvg = 0f
+    private var darkSinceMs = 0L
+    private var lastDarkHintMs = 0L
+
+    private fun onExposure(e: Float) {
+        exposureAvg = if (exposureAvg == 0f) e else exposureAvg * 0.8f + e * 0.2f
+        val now = System.currentTimeMillis()
+        if (exposureAvg < DARK_EXPOSURE) {
+            darkSinceMs = 0L
+            return
+        }
+        if (darkSinceMs == 0L) darkSinceMs = now
+        // Only when it stays dark for a few seconds, never while recording, at most every 90 s.
+        if (now - darkSinceMs < 3000 || recorder != null || countdown != null || now - lastDarkHintMs < 90_000) return
+        lastDarkHintMs = now
+        hint("It's quite dark here. Face a window or a lamp, or turn on more lights, for a sharper video and a cleaner cut-out.")
+        if (settings.handsFree) speak("It's a bit dark. Try facing a window or a lamp.")
+    }
+
     /** Long 4K recordings make phones hot; say so before the phone itself slows down. */
     private fun watchTemperature() {
         if (Build.VERSION.SDK_INT < 29) return
@@ -603,6 +625,7 @@ class MainActivity : AppCompatActivity() {
                 .setResolutionSelector(CameraLenses.resolutionSelector(settings.qualityCap, fourByThree))
                 .setTargetRotation(Surface.ROTATION_0)
             runCatching { CameraLenses.allowLowLightExposure(builder, info) }
+            runCatching { CameraLenses.watchExposure(builder) { e -> main.post { onExposure(e) } } }
             val p = builder.build()
             p.setSurfaceProvider(engine.surfaceProvider(front, info.sensorRotationDegrees))
             try {
@@ -1400,7 +1423,7 @@ class MainActivity : AppCompatActivity() {
         loadThumbInto(uri, ui.lastThumb)
         if (isFinishing || isDestroyed) return
         showResultSheet(uri, "${rec.width} × ${rec.height} · Movies/BackdropCam")
-        if (settings.autoUpload) startUpload()
+        if (settings.autoUpload && settings.driveInApp) startUpload()
         if (settings.handsFree) speak("Saved. Say start to record again.") { coach.reset() }
     }
 
@@ -1532,6 +1555,12 @@ class MainActivity : AppCompatActivity() {
             applyEngineOptions()
         }
 
+        b.driveInAppSwitch.isChecked = settings.driveInApp
+        b.driveInAppSwitch.setOnCheckedChangeListener { _, on ->
+            settings.driveInApp = on
+            b.autoUploadSwitch.isEnabled = on
+        }
+        b.autoUploadSwitch.isEnabled = settings.driveInApp
         b.autoUploadSwitch.isChecked = settings.autoUpload
         b.autoUploadSwitch.setOnCheckedChangeListener { _, on -> settings.autoUpload = on }
 
@@ -1624,7 +1653,9 @@ class MainActivity : AppCompatActivity() {
                 )
             )
         }
-        b.uploadBtn.setOnClickListener { startUpload() }
+        b.uploadBtn.setOnClickListener {
+            if (settings.driveInApp) startUpload() else saveWithDriveApp(uri)
+        }
         b.trimBtn.setOnClickListener { showTrimDialog(uri, dlg) }
         b.retakeBtn.setOnClickListener {
             dlg.dismiss()
@@ -1834,6 +1865,7 @@ class MainActivity : AppCompatActivity() {
         val b = resultUi ?: return
         b.uploadBtn.isEnabled = !uploading
         b.uploadBtn.text = when {
+            !settings.driveInApp -> "Save to Google Drive"
             uploading -> "Uploading…"
             lastLink != null -> "Uploaded to Google Drive"
             else -> "Upload to Google Drive and get link"
@@ -1880,18 +1912,15 @@ class MainActivity : AppCompatActivity() {
             null -> "Google closed the sign-in without giving access."
             else -> "Google refused the sign-in (code $code)."
         }
-        uploadFinished(null, "Could not connect to Google Drive. $why")
-        if (code == 12501 || code == 16 || code == 7) return
-        MaterialAlertDialogBuilder(this)
-            .setTitle("Google Drive is not set up for this app yet")
-            .setMessage(
-                "$why\n\nUploading from inside BackdropCam needs a one-time registration of the app " +
-                    "with Google (Google Cloud Console). Until then, you can save the video with the " +
-                    "Google Drive app instead and copy its link there."
-            )
-            .setPositiveButton("Save with Drive app") { _, _ -> lastVideo?.let { saveWithDriveApp(it) } }
-            .setNegativeButton("Close", null)
-            .show()
+        if (code == 12501 || code == 16 || code == 7) {
+            uploadFinished(null, "Could not connect to Google Drive. $why")
+            return
+        }
+        // Not set up with Google: go straight to the Drive app (no extra question), and use it
+        // from now on. In-app upload can be switched back on in Settings once it is set up.
+        settings.driveInApp = false
+        uploadFinished(null, null)
+        lastVideo?.let { saveWithDriveApp(it) }
     }
 
     /** Hands the video to the Google Drive app ("Save to Drive"); no setup needed. */
@@ -2532,5 +2561,7 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_NONE = "none"
         private const val KEY_BLUR = "blur"
         private const val KEY_ADD = "add"
+        /** ISO x seconds above which the room counts as too dark (e.g. ISO 1600 at 1/40 s). */
+        private const val DARK_EXPOSURE = 40f
     }
 }
