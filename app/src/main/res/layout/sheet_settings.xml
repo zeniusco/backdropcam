@@ -78,6 +78,104 @@
             android:valueFrom="0"
             android:valueTo="1" />
 
+        <!-- Brand -->
+        <TextView style="@style/SheetSection" android:text="Brand" />
+
+        <com.google.android.material.textfield.TextInputLayout
+            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:hint="Your name">
+
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/brandName"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="textPersonName|textCapWords"
+                android:maxLines="1" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <com.google.android.material.textfield.TextInputLayout
+            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:hint="Role or company (optional)">
+
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/brandRole"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="textCapWords"
+                android:maxLines="1" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <TextView style="@style/SheetLabel" android:text="Brand colour" />
+
+        <LinearLayout
+            android:id="@+id/brandColors"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:orientation="horizontal" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/nameTitleSwitch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Show my name on the video (name title)" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/introSwitch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Intro card at the start of each recording" />
+
+        <com.google.android.material.textfield.TextInputLayout
+            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:hint="Intro title (optional, else your name)">
+
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/introTitle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="textCapSentences"
+                android:maxLines="2" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:orientation="horizontal">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/exportKitBtn"
+                style="@style/Widget.Material3.Button.TonalButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Share brand kit" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/importKitBtn"
+                style="@style/Widget.Material3.Button.TonalButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="12dp"
+                android:layout_weight="1"
+                android:text="Import kit" />
+        </LinearLayout>
+
+        <TextView
+            style="@style/SheetLabel"
+            android:text="A brand kit holds your logo, backdrops, name title and colour. Share it with your team so everyone records with the same look." />
+
         <!-- Sharing -->
         <TextView style="@style/SheetSection" android:text="Sharing" />
 

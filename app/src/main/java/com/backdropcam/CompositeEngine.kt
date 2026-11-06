@@ -88,6 +88,8 @@ class CompositeEngine(context: Context) {
     private var logoAspect = 1f  // height / width of the logo image
     private var logo = LogoPlacement()
     private var logoOn = false
+    private var overlayTex = 0
+    private var overlayOn = false
     private var roiTex = 0       // square crop around the person, input of the segmentation
     private var roiFbo = 0
     private var cameraTexture: SurfaceTexture? = null
@@ -261,6 +263,25 @@ class CompositeEngine(context: Context) {
             setLinear(GLES30.GL_TEXTURE_2D)
             logoAspect = bitmap.height.toFloat() / bitmap.width
             logoReady = true
+        }
+    }
+
+    /**
+     * Text and graphics drawn on top of everything (name title, intro card, captions), covering
+     * the visible picture exactly. Null clears it. The bitmap is recycled once uploaded.
+     */
+    fun setOverlay(bitmap: Bitmap?) {
+        handler.post {
+            if (bitmap == null) {
+                overlayOn = false
+                return@post
+            }
+            makeCurrentAny()
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, overlayTex)
+            GLUtils.texImage2D(GLES30.GL_TEXTURE_2D, 0, bitmap, 0)
+            setLinear(GLES30.GL_TEXTURE_2D)
+            bitmap.recycle()
+            overlayOn = true
         }
     }
 
@@ -799,6 +820,10 @@ class CompositeEngine(context: Context) {
         GLES30.glActiveTexture(GLES30.GL_TEXTURE5)
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, maskFullTex)
         GLES30.glUniform1i(loc("uMaskFull"), 5)
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE6)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, overlayTex)
+        GLES30.glUniform1i(loc("uOverlay"), 6)
+        GLES30.glUniform1f(loc("uOverlayOn"), if (overlayOn && renderMode != MODE_RAW) 1f else 0f)
 
         GLES30.glUniform1i(loc("uFrame"), 0)
         GLES30.glUniform1i(loc("uMask"), 1)
@@ -903,21 +928,22 @@ class CompositeEngine(context: Context) {
 
         copyProgram = buildProgram(COPY_VERTEX, COPY_FRAGMENT)
         program = buildProgram(VERTEX, FRAGMENT)
-        val t = IntArray(7)
-        GLES30.glGenTextures(7, t, 0)
+        val t = IntArray(8)
+        GLES30.glGenTextures(8, t, 0)
         oesTex = t[0]; maskTex = t[1]; bgTex = t[2]; smallTex = t[3]; roiTex = t[4]; logoTex = t[5]; maskFullTex = t[6]
+        overlayTex = t[7]
         val f = IntArray(2)
         GLES30.glGenFramebuffers(2, f, 0)
         smallFbo = f[0]; roiFbo = f[1]
 
         GLES30.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, oesTex)
         setLinear(GLES11Ext.GL_TEXTURE_EXTERNAL_OES)
-        for (tex in intArrayOf(maskTex, bgTex, smallTex, roiTex, logoTex, maskFullTex)) {
+        for (tex in intArrayOf(maskTex, bgTex, smallTex, roiTex, logoTex, maskFullTex, overlayTex)) {
             GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, tex)
             setLinear(GLES30.GL_TEXTURE_2D)
         }
         // 1x1 placeholders so every sampler is always valid
-        for (tex in intArrayOf(bgTex, maskTex, logoTex, maskFullTex)) {
+        for (tex in intArrayOf(bgTex, maskTex, logoTex, maskFullTex, overlayTex)) {
             GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, tex)
             GLES30.glTexImage2D(
                 GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA, 1, 1, 0, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE,
@@ -1085,7 +1111,17 @@ uniform vec2 uLogoCenter;
 uniform vec2 uLogoHalf;
 uniform vec2 uLogoRot;      // cos, sin
 uniform float uLogoAlpha;
+uniform sampler2D uOverlay;  // premultiplied, covers the visible picture
+uniform float uOverlayOn;
 out vec4 outColor;
+
+vec3 withOverlay(vec3 c) {
+    if (uOverlayOn < 0.5) return c;
+    vec2 v = (vW - 0.5) / uCrop + 0.5;
+    if (v.x < 0.0 || v.x > 1.0 || v.y < 0.0 || v.y > 1.0) return c;
+    vec4 o = texture(uOverlay, vec2(v.x, 1.0 - v.y));
+    return c * (1.0 - o.a) + o.rgb;
+}
 
 // Draws the logo over colour c at this pixel.
 vec3 withLogo(vec3 c) {
@@ -1129,7 +1165,7 @@ void main() {
         outColor = outside ? vec4(0.0, 0.0, 0.0, 1.0) : vec4(camAt(vW), 1.0);
         return;
     }
-    if (uMode < 0.5) { outColor = vec4(withLogo(adjust(camAt(vW))), 1.0); return; }
+    if (uMode < 0.5) { outColor = vec4(withOverlay(withLogo(adjust(camAt(vW)))), 1.0); return; }
 
     // Where this output pixel falls in the (possibly shrunk and moved) person layer.
     vec2 p = (vW - uPersonAnchor - uPersonOffset) / uPersonScale + uPersonAnchor;
@@ -1194,11 +1230,13 @@ void main() {
         vec2 visible = (vW - 0.5) / uCrop + 0.5; // backdrop fills the visible (cropped) area
         bg = texture(uBg, (img(visible) - 0.5) * uBgScale + 0.5).rgb;
     }
+    vec3 c;
     if (uLogoBehind > 0.5) {
-        outColor = vec4(mix(withLogo(bg), adjust(cam), m), 1.0);  // on the wall, behind you
+        c = mix(withLogo(bg), adjust(cam), m);   // logo on the wall, behind you
     } else {
-        outColor = vec4(withLogo(mix(bg, adjust(cam), m)), 1.0);  // on top, like a TV logo
+        c = withLogo(mix(bg, adjust(cam), m));   // logo on top, like a TV logo
     }
+    outColor = vec4(withOverlay(c), 1.0);
 }
 """
     }

@@ -57,7 +57,9 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.view.updatePadding
+import androidx.core.content.FileProvider
 import androidx.core.widget.ImageViewCompat
+import androidx.core.widget.doAfterTextChanged
 import androidx.core.widget.TextViewCompat
 import com.backdropcam.databinding.ActivityMainBinding
 import com.backdropcam.databinding.DialogScriptBinding
@@ -163,6 +165,33 @@ class MainActivity : AppCompatActivity() {
     private val pickBackdrop =
         registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri -> if (uri != null) addBackdrop(uri) }
 
+    private val overlay = OverlayComposer()
+    private val overlayExecutor = Executors.newSingleThreadExecutor()
+    @Volatile private var overlayState = OverlayComposer.State()
+    private var overlayDirty = false
+    private var introAlpha = 0f
+    private var introStartMs = 0L
+    private lateinit var brandKit: BrandKit
+
+    private val importKit =
+        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            if (uri != null) io.execute {
+                try {
+                    val what = brandKit.import(uri)
+                    val logo = backdrops.loadLogo()
+                    main.post {
+                        if (logo != null) engine.setLogo(logo)
+                        buildBackdropStrip()
+                        applyBackdropSelection()
+                        updateOverlay()
+                        hint("Brand kit imported: $what")
+                    }
+                } catch (e: Exception) {
+                    main.post { hint("Could not import: ${e.message}") }
+                }
+            }
+        }
+
     private val importScript =
         registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             if (uri != null) io.execute {
@@ -195,6 +224,7 @@ class MainActivity : AppCompatActivity() {
         settings = AppSettings(this)
         backdrops = BackdropStore(this)
         scripts = ScriptStore(this)
+        brandKit = BrandKit(this, settings)
         micGain = settings.micGain
         lastVideo = settings.lastVideo?.let(Uri::parse)
 
@@ -350,6 +380,8 @@ class MainActivity : AppCompatActivity() {
                     engine.setDeviceRotation(target)
                     rotateControls(target)
                     updateTeleUi()
+                    ui.aspectChip.text = viewModeLabel()
+                    updateOverlay()
                 }
             }
         }
@@ -512,6 +544,11 @@ class MainActivity : AppCompatActivity() {
             val cameraAspect = nw.toFloat() / nh
             if (screen < cameraAspect) { cropX = screen / cameraAspect; cropY = 1f } else { cropX = 1f; cropY = cameraAspect / screen }
             lp.dimensionRatio = "$rw:$rh"
+        } else if (settings.viewMode == "11") {
+            // Square: the centre of the portrait picture (stays square when turned sideways).
+            val side = minOf(nw, nh).toFloat()
+            cropX = side / nw; cropY = side / nh
+            lp.dimensionRatio = "1:1"
         } else {
             cropX = 1f; cropY = 1f
             lp.dimensionRatio = "$nw:$nh"
@@ -519,31 +556,39 @@ class MainActivity : AppCompatActivity() {
         engine.setCrop(cropX, cropY)
         ui.surface.layoutParams = lp
         ui.aspectChip.text = viewModeLabel()
+        updateOverlay()
     }
 
     private fun viewModeLabel() = when (settings.viewMode) {
-        "169" -> "16:9"
+        "169" -> if (deviceRotation % 180 == 0) "9:16" else "16:9"
+        "11" -> "1:1"
         "43" -> "4:3"
         else -> "FULL"
     }
 
-    /** FULL -> 16:9 -> 4:3 (the widest view the lens can see). */
+    /** Picture shape presets for where the video will be posted. */
     private fun cycleViewMode() {
         if (busy()) return
-        settings.viewMode = when (settings.viewMode) {
-            "full" -> "169"
-            "169" -> "43"
-            else -> "full"
-        }
-        ui.aspectChip.text = viewModeLabel()
-        if ((settings.viewMode == "43") != boundFourByThree) bindCamera() else applyCrop()
-        hint(
-            when (settings.viewMode) {
-                "169" -> "16:9, the standard video shape"
-                "43" -> "4:3, the widest view this lens can see"
-                else -> "Full screen, the video matches your screen"
-            }
+        val modes = listOf("169", "full", "11", "43")
+        val labels = arrayOf(
+            "9:16  Reels, Shorts, TikTok, Status (turn the phone sideways for YouTube 16:9)",
+            "FULL  Fills your screen edge to edge",
+            "1:1  Square, for Instagram and LinkedIn feeds",
+            "4:3  The widest view this lens can see",
         )
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Video format")
+            .setSingleChoiceItems(labels, modes.indexOf(settings.viewMode).coerceAtLeast(0)) { d, which ->
+                d.dismiss()
+                setViewMode(modes[which])
+            }
+            .show()
+    }
+
+    private fun setViewMode(mode: String) {
+        settings.viewMode = mode
+        ui.aspectChip.text = viewModeLabel()
+        if ((mode == "43") != boundFourByThree) bindCamera() else applyCrop()
     }
 
     private fun cycleQuality() {
@@ -1054,6 +1099,10 @@ class MainActivity : AppCompatActivity() {
         }
         setControlsEnabled(false)
         updateMicUi()
+        if (settings.introOn) {
+            introStartMs = System.currentTimeMillis()
+            tickIntro()
+        }
         tickTimer()
     }
 
@@ -1096,6 +1145,10 @@ class MainActivity : AppCompatActivity() {
     private fun stopRecording() {
         val rec = recorder ?: return
         recorder = null
+        if (introAlpha > 0f) {
+            introAlpha = 0f
+            updateOverlay()
+        }
         setShutter(false)
         recDotBlink?.cancel()
         recDotBlink = null
@@ -1262,6 +1315,44 @@ class MainActivity : AppCompatActivity() {
 
         b.autoUploadSwitch.isChecked = settings.autoUpload
         b.autoUploadSwitch.setOnCheckedChangeListener { _, on -> settings.autoUpload = on }
+
+        // Brand
+        b.brandName.setText(settings.brandName)
+        b.brandRole.setText(settings.brandRole)
+        b.introTitle.setText(settings.introTitle)
+        b.brandName.doAfterTextChanged { settings.brandName = it.toString().trim(); updateOverlay() }
+        b.brandRole.doAfterTextChanged { settings.brandRole = it.toString().trim(); updateOverlay() }
+        b.introTitle.doAfterTextChanged { settings.introTitle = it.toString().trim() }
+        b.nameTitleSwitch.isChecked = settings.nameTitleOn
+        b.nameTitleSwitch.setOnCheckedChangeListener { _, on ->
+            settings.nameTitleOn = on
+            if (on && settings.brandName.isBlank()) hint("Type your name above to show it")
+            updateOverlay()
+        }
+        b.introSwitch.isChecked = settings.introOn
+        b.introSwitch.setOnCheckedChangeListener { _, on -> settings.introOn = on }
+        fun drawColors() {
+            b.brandColors.removeAllViews()
+            for (c in OverlayComposer.BRAND_COLORS) {
+                b.brandColors.addView(View(this).apply {
+                    layoutParams = LinearLayout.LayoutParams(dp(34), dp(34)).apply { marginEnd = dp(10) }
+                    background = GradientDrawable().apply {
+                        shape = GradientDrawable.OVAL
+                        setColor(c)
+                        setStroke(dp(if (c == settings.brandColor) 3 else 1), if (c == settings.brandColor) 0xFFFFFFFF.toInt() else 0x55FFFFFF)
+                    }
+                    contentDescription = "Brand colour"
+                    setOnClickListener {
+                        settings.brandColor = c
+                        drawColors()
+                        updateOverlay()
+                    }
+                })
+            }
+        }
+        drawColors()
+        b.exportKitBtn.setOnClickListener { shareBrandKit() }
+        b.importKitBtn.setOnClickListener { importKit.launch(arrayOf("application/zip", "application/octet-stream")) }
         dlg.show()
     }
 
@@ -1679,6 +1770,73 @@ class MainActivity : AppCompatActivity() {
             updateLogo { it.copy(rotation = (it.rotation - delta) % 360f) }
         }
         logoTwistAngle = angle
+    }
+
+    // ================================================================== text overlay and brand kit
+
+    /** Redraws the text layer (name title, intro card, captions) for the current picture shape. */
+    private fun updateOverlay() {
+        val nw = engine.naturalWidth
+        val nh = engine.naturalHeight
+        if (nw == 0 || nh == 0) return
+        var vw = nw * cropX
+        var vh = nh * cropY
+        if (deviceRotation % 180 != 0) vw = vh.also { vh = vw }
+        overlayState = OverlayComposer.State(
+            name = settings.brandName,
+            role = settings.brandRole,
+            brandColor = settings.brandColor,
+            showNameTitle = settings.nameTitleOn,
+            introTitle = settings.introTitle,
+            introSubtitle = "",
+            introAlpha = introAlpha,
+            caption = captionText,
+        )
+        // Coalesce: only the newest state is drawn.
+        if (overlayDirty) return
+        overlayDirty = true
+        overlayExecutor.execute {
+            main.post { overlayDirty = false }
+            val bmp = runCatching { overlay.render(vw, vh, overlayState) }.getOrNull()
+            engine.setOverlay(bmp)
+        }
+    }
+
+    /** Text shown as live captions (set by the captions feature). */
+    private var captionText = ""
+
+    /** Intro card: fades in, holds, fades out over the first ~3 seconds of a recording. */
+    private fun tickIntro() {
+        if (recorder == null) return
+        val t = (System.currentTimeMillis() - introStartMs) / 1000f
+        introAlpha = when {
+            t < 0.35f -> t / 0.35f
+            t < 2.6f -> 1f
+            t < 3.1f -> 1f - (t - 2.6f) / 0.5f
+            else -> 0f
+        }
+        updateOverlay()
+        if (t < 3.1f) main.postDelayed({ tickIntro() }, 80)
+    }
+
+    private fun shareBrandKit() {
+        io.execute {
+            try {
+                val file = brandKit.export()
+                val uri = FileProvider.getUriForFile(this, "$packageName.files", file)
+                main.post {
+                    startActivitySafe(
+                        Intent.createChooser(
+                            Intent(Intent.ACTION_SEND).setType("application/zip").putExtra(Intent.EXTRA_STREAM, uri)
+                                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
+                            "Share brand kit"
+                        )
+                    )
+                }
+            } catch (e: Exception) {
+                main.post { hint("Could not create the kit: ${e.message}") }
+            }
+        }
     }
 
     // ================================================================== helpers
