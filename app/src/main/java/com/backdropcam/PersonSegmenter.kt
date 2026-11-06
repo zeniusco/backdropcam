@@ -162,7 +162,7 @@ class PersonSegmenter(context: Context, highQuality: Boolean, allowGpu: Boolean 
     companion object {
         private const val TAG = "PersonSegmenter"
         /** Temporal smoothing of still edges: higher is steadier. Moving edges are not smoothed. */
-        private const val SMOOTHING = 0.8f
+        private const val SMOOTHING = 0.6f
         const val MODEL_HQ = "selfie_multiclass_256x256.tflite"
         const val MODEL_FAST = "selfie_segmenter.tflite"
     }

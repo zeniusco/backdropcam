@@ -117,6 +117,15 @@ class CompositeEngine(context: Context) {
      */
     @Volatile var fastPreview = false
 
+    // Steadied cut-out (alpha), ping-ponged between two textures in world space.
+    private val alphaTex = IntArray(2)
+    private val alphaFbo = IntArray(2)
+    private var alphaW = 0
+    private var alphaH = 0
+    private var alphaCur = 0
+    private var alphaHasPrev = false
+    private var alphaReady = false
+
     private val ring = ArrayList<Slot>()
     private var ringW = 0
     private var ringH = 0
@@ -697,6 +706,7 @@ class CompositeEngine(context: Context) {
         slot.ptsNs = if (slot.encode) recordPts() else 0L
         slot.shown = false
         if (fastPreview && (mode != MODE_NONE || framingWanted) && segmenter != null) {
+            computeAlpha(slot)
             showOnScreen(slot)
             slot.shown = true
         }
@@ -925,6 +935,7 @@ class CompositeEngine(context: Context) {
     private fun present(slot: Slot) {
         slot.pending = false
         makeCurrentAny()
+        if (!slot.shown || slot.encode) computeAlpha(slot)
         maybeSnapshot(slot)
         if (!slot.shown) {
             showOnScreen(slot)
@@ -939,6 +950,45 @@ class CompositeEngine(context: Context) {
             EGL14.eglSwapBuffers(display, encoderSurface)
         }
         makeCurrentAny()
+    }
+
+    /** Runs the alpha pass for [slot]: its cut-out, steadied against the previous frame. */
+    private fun computeAlpha(slot: Slot) {
+        if (mode == MODE_NONE || !fullReady) {
+            alphaReady = false
+            return
+        }
+        val (ww, wh) = worldSize()
+        if (ww == 0 || wh == 0) return
+        // Enough detail for sharp edges, without costing much: 1440 px on the long side
+        // (960 on weak phones).
+        val cap = if (fastPreview) 960f else 1440f
+        val s = min(1f, cap / max(ww, wh))
+        val w = (ww * s).roundToInt().coerceAtLeast(2)
+        val h = (wh * s).roundToInt().coerceAtLeast(2)
+        if (w != alphaW || h != alphaH) {
+            if (alphaTex[0] == 0) {
+                GLES30.glGenTextures(2, alphaTex, 0)
+                GLES30.glGenFramebuffers(2, alphaFbo, 0)
+            }
+            for (i in 0..1) {
+                GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, alphaTex[i])
+                GLES30.glTexImage2D(GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA, w, h, 0, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, null)
+                setLinear(GLES30.GL_TEXTURE_2D)
+                GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, alphaFbo[i])
+                GLES30.glFramebufferTexture2D(GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0, GLES30.GL_TEXTURE_2D, alphaTex[i], 0)
+            }
+            alphaW = w; alphaH = h
+            alphaHasPrev = false
+        }
+        makeCurrentAny()
+        val next = 1 - alphaCur
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, alphaFbo[next])
+        render(alphaW, alphaH, identity(), MODE_ALPHA, slot.tex)
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+        alphaCur = next
+        alphaHasPrev = true
+        alphaReady = true
     }
 
     private fun updateBlurSource(slot: Slot) {
@@ -1035,6 +1085,8 @@ class CompositeEngine(context: Context) {
     }
 
     private fun invalidateMask() {
+        alphaHasPrev = false
+        alphaReady = false
         fullReady = false
         roiReady = false
         maskGen++
@@ -1071,7 +1123,19 @@ class CompositeEngine(context: Context) {
         GLES30.glUniform1i(loc("uBgVideo"), 7)
         GLES30.glUniform1f(loc("uBgIsVideo"), if (bgIsVideo) 1f else 0f)
         GLES30.glUniformMatrix4fv(loc("uBgVideoM"), 1, false, bgVideoMatrix, 0)
-        GLES30.glUniform1f(loc("uOverlayOn"), if (overlayOn && renderMode != MODE_RAW) 1f else 0f)
+        GLES30.glUniform1f(loc("uOverlayOn"), if (overlayOn && renderMode != MODE_RAW && renderMode != MODE_ALPHA) 1f else 0f)
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE8)
+        if (renderMode == MODE_ALPHA) {
+            // Read the previous result, write the other texture (never the one being read).
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, alphaTex[alphaCur])
+            GLES30.glUniform1i(loc("uAlphaPrev"), 8)
+            GLES30.glUniform1f(loc("uHasPrev"), if (alphaHasPrev) 1f else 0f)
+            GLES30.glUniform1f(loc("uAlphaReady"), 0f)
+        } else {
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, alphaTex[alphaCur])
+            GLES30.glUniform1i(loc("uAlpha"), 8)
+            GLES30.glUniform1f(loc("uAlphaReady"), if (alphaReady && alphaTex[0] != 0) 1f else 0f)
+        }
 
         GLES30.glUniform1i(loc("uFrame"), 0)
         GLES30.glUniform1i(loc("uMask"), 1)
@@ -1265,6 +1329,7 @@ class CompositeEngine(context: Context) {
         const val MODE_BLUR = 1   // blurred real background
         const val MODE_IMAGE = 2  // backdrop image
         private const val MODE_RAW = 3
+        private const val MODE_ALPHA = 4 // steadied cut-out pass
 
         private fun identity() = FloatArray(16).also { Matrix.setIdentityM(it, 0) }
 
@@ -1370,6 +1435,10 @@ uniform vec2 uLogoRot;      // cos, sin
 uniform float uLogoAlpha;
 uniform sampler2D uOverlay;  // premultiplied, covers the visible picture
 uniform float uOverlayOn;
+uniform sampler2D uAlpha;      // steadied cut-out of the current frame (world space)
+uniform sampler2D uAlphaPrev;  // the previous one (alpha pass only): r = alpha, g = brightness
+uniform float uAlphaReady;
+uniform float uHasPrev;
 out vec4 outColor;
 
 vec3 withOverlay(vec3 c) {
@@ -1415,21 +1484,7 @@ vec3 adjust(vec3 c) {
     return clamp(c, 0.0, 1.0);
 }
 
-void main() {
-    if (uMode > 2.5) {
-        // Raw copy (crops for the model, blur source): black outside the picture.
-        bool outside = vW.x < 0.0 || vW.x > 1.0 || vW.y < 0.0 || vW.y > 1.0;
-        outColor = outside ? vec4(0.0, 0.0, 0.0, 1.0) : vec4(camAt(vW), 1.0);
-        return;
-    }
-    if (uMode < 0.5) { outColor = vec4(withOverlay(withLogo(adjust(camAt(vW)))), 1.0); return; }
-
-    // Where this output pixel falls in the (possibly shrunk and moved) person layer.
-    vec2 p = (vW - uPersonAnchor - uPersonOffset) / uPersonScale + uPersonAnchor;
-    vec3 cam = camAt(p);
-    float inside = smoothstep(0.0, uFeather.x, p.x) * smoothstep(0.0, uFeather.x, 1.0 - p.x)
-                 * smoothstep(0.0, uFeather.x, 1.0 - p.y) * smoothstep(0.0, uFeather.y, p.y);
-
+float rawAlpha(vec2 p, vec3 cam) {
     float m = 1.0;
     // Is this pixel near the edge of the person? Five cheap taps decide. Far inside you or far
     // out in the background the expensive edge refinement below would not change anything, so
@@ -1486,6 +1541,46 @@ void main() {
         } else {
             m = m0;
         }
+    }
+    return m;
+}
+
+void main() {
+    if (uMode > 3.5) {
+        // Alpha pass: the cut-out of the camera picture, steadied over time. Where the picture
+        // did not change since the last frame, the edge keeps most of its previous value, so
+        // model and camera noise cannot make it flicker; where you moved it follows at once.
+        vec3 cam = camAt(vW);
+        float a = uHasMask > 0.5 ? rawAlpha(vW, cam) : 1.0;
+        vec3 soft = textureLod(uFrame, (uNFromW * vec4(vW, 0.0, 1.0)).xy, 2.0).rgb;
+        float luma = dot(soft, vec3(0.299, 0.587, 0.114));
+        if (uHasPrev > 0.5) {
+            vec4 prev = texture(uAlphaPrev, vW);
+            float moved = abs(luma - prev.g);
+            float k = 0.8 * (1.0 - smoothstep(0.025, 0.09, moved));
+            a = mix(a, prev.r, k);
+        }
+        outColor = vec4(a, luma, 0.0, 1.0);
+        return;
+    }
+    if (uMode > 2.5) {
+        // Raw copy (crops for the model, blur source): black outside the picture.
+        bool outside = vW.x < 0.0 || vW.x > 1.0 || vW.y < 0.0 || vW.y > 1.0;
+        outColor = outside ? vec4(0.0, 0.0, 0.0, 1.0) : vec4(camAt(vW), 1.0);
+        return;
+    }
+    if (uMode < 0.5) { outColor = vec4(withOverlay(withLogo(adjust(camAt(vW)))), 1.0); return; }
+
+    // Where this output pixel falls in the (possibly shrunk and moved) person layer.
+    vec2 p = (vW - uPersonAnchor - uPersonOffset) / uPersonScale + uPersonAnchor;
+    vec3 cam = camAt(p);
+    float inside = smoothstep(0.0, uFeather.x, p.x) * smoothstep(0.0, uFeather.x, 1.0 - p.x)
+                 * smoothstep(0.0, uFeather.x, 1.0 - p.y) * smoothstep(0.0, uFeather.y, p.y);
+
+    float m = 1.0;
+    if (uHasMask > 0.5) {
+        // Steadied cut-out from the alpha pass (falls back to computing it here).
+        m = uAlphaReady > 0.5 ? texture(uAlpha, clamp(p, 0.0, 1.0)).r : rawAlpha(p, cam);
     }
     m = smoothstep(uEdge.x, uEdge.y, m) * inside;
 
