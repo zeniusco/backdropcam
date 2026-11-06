@@ -272,7 +272,7 @@ class MainActivity : AppCompatActivity() {
             voice.mutedUntil = System.currentTimeMillis() + 700
             startListening()
         }
-        if (settings.handsFree) loadVoice()
+        if (needsSpeechModel()) loadVoice()
         applyEngineOptions()
         loadSegmenter()
 
@@ -1102,6 +1102,25 @@ class MainActivity : AppCompatActivity() {
         val audio = settings.micOn && granted(Manifest.permission.RECORD_AUDIO)
         val listenForStop = settings.handsFree && audio
 
+        // Captions / subtitle file / voice-following teleprompter all read the recording's sound.
+        val wantText = audio && (settings.captionsOn || settings.srtOn || followActive())
+        var tr: LiveTranscriber? = null
+        if (wantText) {
+            val r = voice.newTranscriptionRecognizer()
+            if (r == null) {
+                hint("Captions are still getting ready. They will work on your next recording.")
+                loadVoice()
+            } else {
+                tr = LiveTranscriber(
+                    r,
+                    onCaption = { if (settings.captionsOn) { captionText = it; updateOverlay() } },
+                    onWords = { followScript(it) },
+                )
+            }
+        }
+        transcriber = tr
+        follower = if (followActive()) settings.teleScript?.let { scripts.load(it) }?.let { ScriptFollower(it.body) } else null
+
         micMonitor?.stop()
         micMonitor = null
         voice.stop() // free the microphone for the recorder
@@ -1116,7 +1135,10 @@ class MainActivity : AppCompatActivity() {
                 muted = { micMuted },
                 onLevel = { level -> main.post { ui.levelBar.progress = (level * 100).toInt() } },
                 // In hands-free mode the recording's own sound is checked for "stop".
-                onPcm = if (listenForStop) { pcm: ShortArray, n: Int, t: Long -> voice.feed48k(pcm, n, t) } else null,
+                onPcm = if (listenForStop || tr != null) { pcm: ShortArray, n: Int, t: Long ->
+                    if (listenForStop) voice.feed48k(pcm, n, t)
+                    tr?.feed48k(pcm, n, t)
+                } else null,
                 music = if (audio && settings.musicOn && musicFile.exists()) MusicSource(musicFile) else null,
                 musicVolume = { settings.musicVolume },
                 musicDuck = { settings.musicDuck },
@@ -1145,7 +1167,7 @@ class MainActivity : AppCompatActivity() {
         ui.pauseBtn.setImageResource(R.drawable.ic_pause)
         if (ui.teleBox.visibility == View.VISIBLE) {
             ui.teleScroll.scrollTo(0, 0)
-            teleRunning = true
+            teleRunning = follower == null // with voice-following, your speech moves the script
         }
         setControlsEnabled(false)
         updateMicUi()
@@ -1181,7 +1203,7 @@ class MainActivity : AppCompatActivity() {
             rec.resume()
             voice.reset() // word timings restart with the resumed recording clock
             recDotBlink?.resume()
-            if (ui.teleBox.visibility == View.VISIBLE) teleRunning = true
+            if (ui.teleBox.visibility == View.VISIBLE && follower == null) teleRunning = true
             ui.pauseBtn.setImageResource(R.drawable.ic_pause)
         } else {
             rec.pause()
@@ -1195,8 +1217,12 @@ class MainActivity : AppCompatActivity() {
     private fun stopRecording() {
         val rec = recorder ?: return
         recorder = null
-        if (introAlpha > 0f) {
+        val tr = transcriber
+        transcriber = null
+        follower = null
+        if (introAlpha > 0f || captionText.isNotEmpty()) {
             introAlpha = 0f
+            captionText = ""
             updateOverlay()
         }
         setShutter(false)
@@ -1213,8 +1239,17 @@ class MainActivity : AppCompatActivity() {
             io.execute {
                 try {
                     val uri = rec.finish()
-                    main.post { onVideoSaved(uri, rec) }
+                    var srt: String? = null
+                    if (tr != null) {
+                        val words = runCatching { tr.finish() }.getOrDefault(emptyList())
+                        if (settings.srtOn) srt = runCatching { SubtitleWriter.save(this, rec.displayName, words) }.getOrNull()
+                    }
+                    main.post {
+                        onVideoSaved(uri, rec)
+                        if (srt != null) hint("Subtitles saved: $srt")
+                    }
                 } catch (e: Exception) {
+                    runCatching { tr?.finish() }
                     main.post {
                         hint("Could not save the video: ${e.message}")
                         if (settings.handsFree) speak("Sorry, saving failed.")
@@ -1361,6 +1396,18 @@ class MainActivity : AppCompatActivity() {
         b.softnessSlider.addOnChangeListener { _, v, _ ->
             settings.softness = v
             applyEngineOptions()
+        }
+
+        // Captions
+        b.captionsSwitch.isChecked = settings.captionsOn
+        b.captionsSwitch.setOnCheckedChangeListener { _, on ->
+            settings.captionsOn = on
+            if (on) loadVoice()
+        }
+        b.srtSwitch.isChecked = settings.srtOn
+        b.srtSwitch.setOnCheckedChangeListener { _, on ->
+            settings.srtOn = on
+            if (on) loadVoice()
         }
 
         b.autoUploadSwitch.isChecked = settings.autoUpload
@@ -1641,19 +1688,38 @@ class MainActivity : AppCompatActivity() {
             loadVoice()
         } else {
             speaker.stop()
-            voice.unload()
+            voice.stop()
+            if (!needsSpeechModel()) voice.unload()
             hint("Hands-free off")
         }
+    }
+
+    /** The offline speech model is needed by hands-free, captions and the voice-following teleprompter. */
+    private fun needsSpeechModel() =
+        settings.handsFree || settings.captionsOn || settings.srtOn || (settings.teleFollow && settings.teleScript != null)
+
+    private var transcriber: LiveTranscriber? = null
+    private var follower: ScriptFollower? = null
+
+    private fun followActive() = settings.teleFollow && ui.teleBox.visibility == View.VISIBLE
+
+    /** Moves the teleprompter so the line being spoken sits near the top of the box. */
+    private fun followScript(words: List<String>) {
+        val offset = follower?.advance(words) ?: return
+        val layout = ui.teleText.layout ?: return
+        val line = layout.getLineForOffset(offset)
+        val y = ui.teleText.paddingTop + layout.getLineTop(line) - (ui.teleScroll.height * 0.3f).toInt()
+        ui.teleScroll.smoothScrollTo(0, y.coerceAtLeast(0))
     }
 
     /** Loads the offline speech model (about 100 MB of memory), so only while hands-free is on. */
     private fun loadVoice() {
         if (voice.available) return
-        if (!File(filesDir, "vosk-en").exists()) hint("Preparing voice commands, this takes a moment the first time")
+        if (!File(filesDir, "vosk-en").exists()) hint("Preparing speech recognition, this takes a moment the first time")
         voice.load { ok ->
             main.post {
                 when {
-                    !settings.handsFree -> voice.unload() // switched off again while loading
+                    !needsSpeechModel() -> voice.unload() // switched off again while loading
                     !ok -> hint("Voice commands could not start. Guidance still works.")
                     else -> startListening()
                 }
@@ -1734,6 +1800,11 @@ class MainActivity : AppCompatActivity() {
         dlg.setContentView(b.root)
         b.teleSwitch.isChecked = settings.teleOn
         b.teleSwitch.setOnCheckedChangeListener { _, on -> settings.teleOn = on; updateTeleUi() }
+        b.followSwitch.isChecked = settings.teleFollow
+        b.followSwitch.setOnCheckedChangeListener { _, on ->
+            settings.teleFollow = on
+            if (on) loadVoice()
+        }
         b.speedSlider.value = settings.teleSpeed.coerceIn(1, 10).toFloat()
         b.speedSlider.addOnChangeListener { _, v, _ -> settings.teleSpeed = v.toInt() }
         b.sizeSlider.value = (settings.teleSize.coerceIn(18, 48) / 2 * 2).toFloat()

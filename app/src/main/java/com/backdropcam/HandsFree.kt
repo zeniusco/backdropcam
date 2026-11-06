@@ -190,6 +190,10 @@ class KeywordSpotter(context: Context, private val onWord: (word: String, atUs: 
         }, "vosk-load").start()
     }
 
+    /** A free-form English recogniser on the same model (for captions), or null if not loaded. */
+    fun newTranscriptionRecognizer(): Recognizer? =
+        synchronized(lock) { model?.let { Recognizer(it, 16000f).apply { setWords(true) } } }
+
     /** Frees the model's memory (about 100 MB). [load] brings it back. */
     fun unload() {
         stop()

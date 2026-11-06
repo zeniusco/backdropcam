@@ -78,6 +78,26 @@
             android:valueFrom="0"
             android:valueTo="1" />
 
+        <!-- Captions -->
+        <TextView style="@style/SheetSection" android:text="Captions (English, offline)" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/captionsSwitch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="Live captions in the video" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/srtSwitch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Also save a subtitle file (.srt) in Documents/BackdropCam" />
+
+        <TextView
+            style="@style/SheetLabel"
+            android:text="Captions appear about half a second after you say the words. They need Record sound on." />
+
         <!-- Music -->
         <TextView style="@style/SheetSection" android:text="Background music" />
 

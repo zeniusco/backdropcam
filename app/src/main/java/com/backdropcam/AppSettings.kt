@@ -125,6 +125,23 @@ class AppSettings(context: Context) {
 
     fun setLogoPlacement(backdrop: String, v: LogoPlacement) = p.edit().putString("logo_$backdrop", v.toString()).apply()
 
+    // ---------------------------------------------------------------- captions
+
+    /** Live captions drawn into the video. */
+    var captionsOn: Boolean
+        get() = p.getBoolean("captionsOn", false)
+        set(v) = p.edit().putBoolean("captionsOn", v).apply()
+
+    /** Save an .srt subtitle file next to each recording. */
+    var srtOn: Boolean
+        get() = p.getBoolean("srtOn", false)
+        set(v) = p.edit().putBoolean("srtOn", v).apply()
+
+    /** Teleprompter scrolls by following your voice instead of a fixed speed. */
+    var teleFollow: Boolean
+        get() = p.getBoolean("teleFollow", true)
+        set(v) = p.edit().putBoolean("teleFollow", v).apply()
+
     // ---------------------------------------------------------------- music
 
     var musicOn: Boolean
