@@ -281,6 +281,7 @@ class MainActivity : AppCompatActivity() {
                 if (settings.handsFree && recorder == null && countdown == null && !speaker.isSpeaking) coach.update(f)
             }
             framingWanted = settings.handsFree
+            onTooSlow = { easeForSlowPhone() }
         }
         speaker = Speaker(this)
         coach = FramingCoach { speak(it) }
@@ -322,6 +323,31 @@ class MainActivity : AppCompatActivity() {
             }, 1200)
         }
         watchTemperature()
+    }
+
+    /**
+     * The phone cannot keep up with the cut-out: switch to the fast model first, then (if still
+     * slow) to 1080p. Never while recording, and each step only once.
+     */
+    private fun easeForSlowPhone() {
+        if (recorder != null || countdown != null) return
+        when {
+            settings.highQualityCutout && !settings.slowModelHandled -> {
+                settings.slowModelHandled = true
+                settings.highQualityCutout = false
+                applyEngineOptions()
+                loadSegmenter()
+                engine.resetSpeedCheck()
+                hint("This phone was struggling, so the cut-out switched to Fast for smooth video. You can change it in Settings.")
+            }
+            settings.quality == "max" && !settings.slowPhoneHandled -> {
+                settings.slowPhoneHandled = true
+                settings.quality = "1080"
+                engine.resetSpeedCheck()
+                bindCamera()
+                hint("Switched to 1080p so this phone keeps up. Tap the quality chip to change it.")
+            }
+        }
     }
 
     /** Long 4K recordings make phones hot; say so before the phone itself slows down. */

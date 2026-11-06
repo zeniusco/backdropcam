@@ -6,13 +6,24 @@ import android.content.Context
 class AppSettings(context: Context) {
     private val p = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
 
+    /**
+     * Older or low-memory phones: start at 1080p with the fast cut-out model, which they can run
+     * smoothly. The user can still pick higher settings themselves.
+     */
+    val lowEndPhone: Boolean = run {
+        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+        val mem = android.app.ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }
+        am.isLowRamDevice || mem.totalMem < 5L * 1024 * 1024 * 1024 ||
+            android.os.Build.VERSION.SDK_INT < 29 || Runtime.getRuntime().availableProcessors() < 6
+    }
+
     /** "max", "1080" or "720" */
     var quality: String
-        get() = p.getString("quality", "max")!!
+        get() = p.getString("quality", if (lowEndPhone) "1080" else "max")!!
         set(v) = p.edit().putString("quality", v).apply()
 
     var highQualityCutout: Boolean
-        get() = p.getBoolean("hq", true)
+        get() = p.getBoolean("hq", !lowEndPhone)
         set(v) = p.edit().putBoolean("hq", v).apply()
 
     var softness: Float
@@ -49,6 +60,15 @@ class AppSettings(context: Context) {
     var backdrop: String
         get() = p.getString("backdrop", "blur")!!
         set(v) = p.edit().putString("backdrop", v).apply()
+
+    /** Set once the app has eased its settings for a slow phone (so it only happens once). */
+    var slowPhoneHandled: Boolean
+        get() = p.getBoolean("slowPhoneHandled", false)
+        set(v) = p.edit().putBoolean("slowPhoneHandled", v).apply()
+
+    var slowModelHandled: Boolean
+        get() = p.getBoolean("slowModelHandled", false)
+        set(v) = p.edit().putBoolean("slowModelHandled", v).apply()
 
     var firstRun: Boolean
         get() = p.getBoolean("firstRun", true)

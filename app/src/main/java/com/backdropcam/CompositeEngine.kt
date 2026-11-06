@@ -699,7 +699,9 @@ class CompositeEngine(context: Context) {
             segExecutor.execute {
                 var mask: PersonSegmenter.Mask? = null
                 try {
+                    val t0 = SystemClock.uptimeMillis()
                     mask = segmenter?.segment(bmp, resetSmoothing = roiChanged)
+                    noteSegmentationTime(SystemClock.uptimeMillis() - t0)
                     if (mask != null) {
                         // A whole-picture pass decides the crop afresh (it may have drifted);
                         // a crop pass keeps it unless the person nears its edge.
@@ -720,6 +722,30 @@ class CompositeEngine(context: Context) {
         } catch (e: RejectedExecutionException) {
             segBusy.set(false)
         }
+    }
+
+    /**
+     * Called on the main thread when the phone cannot keep up (the cut-out takes longer than
+     * about 90 ms a frame on average), so the app can switch to lighter settings.
+     */
+    var onTooSlow: (() -> Unit)? = null
+    private var segTimeAvg = 0f
+    private var segSamples = 0
+    private var slowReported = false
+
+    /** Runs on the segmentation thread. */
+    private fun noteSegmentationTime(ms: Long) {
+        segSamples++
+        segTimeAvg = if (segSamples == 1) ms.toFloat() else segTimeAvg * 0.9f + ms * 0.1f
+        if (segSamples > 30 && segTimeAvg > 90f && !slowReported) {
+            slowReported = true
+            ContextCompat.getMainExecutor(appContext).execute { onTooSlow?.invoke() }
+        }
+    }
+
+    /** Start measuring speed afresh (after the settings changed). */
+    fun resetSpeedCheck() {
+        segExecutor.execute { segSamples = 0; segTimeAvg = 0f; slowReported = false }
     }
 
     /** A square crop (in pixels) covering the whole picture, letterboxed. */
