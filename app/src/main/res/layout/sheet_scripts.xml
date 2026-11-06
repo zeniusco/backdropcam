@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="24dp">
+
+        <TextView style="@style/SheetTitle" android:text="Teleprompter" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/teleSwitch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Show teleprompter (front camera)" />
+
+        <TextView style="@style/SheetLabel" android:text="Scroll speed" />
+
+        <com.google.android.material.slider.Slider
+            android:id="@+id/speedSlider"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:stepSize="1"
+            android:valueFrom="1"
+            android:valueTo="10" />
+
+        <TextView style="@style/SheetLabel" android:text="Text size" />
+
+        <com.google.android.material.slider.Slider
+            android:id="@+id/sizeSlider"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:stepSize="2"
+            android:valueFrom="18"
+            android:valueTo="48" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:orientation="horizontal">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/newScriptBtn"
+                style="@style/Widget.Material3.Button.TonalButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="New script" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/importScriptBtn"
+                style="@style/Widget.Material3.Button.TonalButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="12dp"
+                android:layout_weight="1"
+                android:text="Import .txt / .docx" />
+        </LinearLayout>
+
+        <TextView
+            style="@style/SheetLabel"
+            android:text="Your scripts (tap to use, long-press to edit or delete). You can also share text to BackdropCam from Google Docs, Notes or WhatsApp." />
+
+        <LinearLayout
+            android:id="@+id/scriptList"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:orientation="vertical" />
+    </LinearLayout>
+</androidx.core.widget.NestedScrollView>

@@ -13,6 +13,8 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1"
+        // Phones only (keeps the app smaller than also shipping emulator x86 code)
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
     }
 
     signingConfigs {
@@ -35,7 +37,7 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { viewBinding = true }
-    androidResources { noCompress += "tflite" }
+    androidResources { noCompress += listOf("tflite") }
 }
 
 dependencies {
@@ -43,6 +45,7 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.constraintlayout:constraintlayout:2.2.0")
+    implementation("androidx.exifinterface:exifinterface:1.3.7")
 
     val camerax = "1.4.1"
     implementation("androidx.camera:camera-core:$camerax")
@@ -55,4 +58,7 @@ dependencies {
     // Google Drive upload (OAuth token via Identity Authorization API, upload via REST)
     implementation("com.google.android.gms:play-services-auth:21.3.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    // QR code for the second-phone remote link
+    implementation("com.google.zxing:core:3.5.3")
 }

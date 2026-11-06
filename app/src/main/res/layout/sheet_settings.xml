@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingStart="24dp"
+        android:paddingTop="8dp"
+        android:paddingEnd="24dp"
+        android:paddingBottom="32dp">
+
+        <TextView style="@style/SheetTitle" android:text="Settings" />
+
+        <!-- Recording -->
+        <TextView style="@style/SheetSection" android:text="Recording" />
+
+        <TextView style="@style/SheetLabel" android:text="Stop automatically after" />
+
+        <com.google.android.material.chip.ChipGroup
+            android:id="@+id/autoStopGroup"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            app:selectionRequired="true"
+            app:singleSelection="true">
+
+            <com.google.android.material.chip.Chip android:id="@+id/as0" style="@style/Widget.Material3.Chip.Filter" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Off" />
+            <com.google.android.material.chip.Chip android:id="@+id/as30" style="@style/Widget.Material3.Chip.Filter" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="30s" />
+            <com.google.android.material.chip.Chip android:id="@+id/as60" style="@style/Widget.Material3.Chip.Filter" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="60s" />
+            <com.google.android.material.chip.Chip android:id="@+id/as90" style="@style/Widget.Material3.Chip.Filter" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="90s" />
+            <com.google.android.material.chip.Chip android:id="@+id/as120" style="@style/Widget.Material3.Chip.Filter" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="120s" />
+            <com.google.android.material.chip.Chip android:id="@+id/as150" style="@style/Widget.Material3.Chip.Filter" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="150s" />
+            <com.google.android.material.chip.Chip android:id="@+id/as180" style="@style/Widget.Material3.Chip.Filter" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="180s" />
+        </com.google.android.material.chip.ChipGroup>
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/smallFilesSwitch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Smaller files (H.265). Turn off only if an old player cannot open your videos" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/mirrorSwitch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Mirror the front camera" />
+
+        <!-- Cut-out -->
+        <TextView style="@style/SheetSection" android:text="Cut-out" />
+
+        <com.google.android.material.chip.ChipGroup
+            android:id="@+id/modelGroup"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            app:selectionRequired="true"
+            app:singleSelection="true">
+
+            <com.google.android.material.chip.Chip
+                android:id="@+id/mHq"
+                style="@style/Widget.Material3.Chip.Filter"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Best hair detail (fast phones only, may slow the video)" />
+
+            <com.google.android.material.chip.Chip
+                android:id="@+id/mFast"
+                style="@style/Widget.Material3.Chip.Filter"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Smooth (recommended)" />
+        </com.google.android.material.chip.ChipGroup>
+
+        <TextView style="@style/SheetLabel" android:text="Edge softness" />
+
+        <com.google.android.material.slider.Slider
+            android:id="@+id/softnessSlider"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:valueFrom="0"
+            android:valueTo="1" />
+
+        <!-- Sharing -->
+        <TextView style="@style/SheetSection" android:text="Sharing" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/driveInAppSwitch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="Upload inside the app and copy the link automatically (needs the app registered with Google; off = use the Drive app)" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/autoUploadSwitch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="Upload to Google Drive after each recording" />
+
+        <!-- Tips -->
+        <TextView style="@style/SheetSection" android:text="Tips" />
+
+        <TextView
+            style="@style/SheetLabel"
+            android:lineSpacingMultiplier="1.25"
+            android:text="• Volume buttons or a Bluetooth selfie remote start and stop recording.\n• Share text from Docs, Notes or WhatsApp to BackdropCam to make a teleprompter script." />
+    </LinearLayout>
+</androidx.core.widget.NestedScrollView>

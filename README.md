@@ -1,14 +1,36 @@
 # BackdropCam (Android)
 
-Record video with the front or back camera in front of your own backdrop image.
-The person is cut out live, composited over the backdrop, recorded as MP4, saved to the
-gallery, uploaded to Google Drive and shared as an "anyone with the link" URL.
+Record video with the front or back camera in front of your own backdrop. You are cut out live,
+placed over the backdrop, and the result is saved as an MP4 in the gallery (Movies/BackdropCam).
+Optionally it uploads to Google Drive and copies a share link.
 
-## Build
+## Get the app
 
-1. Open this folder in Android Studio (Ladybug or newer). It creates the Gradle wrapper and
-   downloads the Android SDK pieces on first sync.
-2. Run on a real phone (Android 8.0+, OpenGL ES 3.0). Emulators do not give a usable camera or encoder.
+Every push builds an APK. Download `BackdropCam.apk` from the latest
+[release](../../releases) on your phone and install it.
+
+## Features
+
+- Front and back camera, highest resolution the camera and encoder support (up to 4K)
+- Ultra-wide 0.6x lens when the phone exposes it
+- Picture shape: FULL (fills the screen), 16:9, or 4:3 (widest view)
+- Backdrops: your images, Blur, or None; resize and move yourself, match brightness and warmth
+- Portrait or landscape recording, follows how you hold the phone
+- Pause / resume, countdown timer, auto-stop (30 to 180 s)
+- Mic on/off, volume 0 to 200 %, live level meter, mute while recording
+- Hands-free: spoken framing guidance, say "start" / "stop" (offline, no internet)
+- Teleprompter for the front camera: type, paste, share text in, or import .txt / .docx
+- Volume buttons and Bluetooth selfie remotes start and stop recording
+- Google Drive upload with an "anyone with the link" URL
+- Formats: 9:16 (Reels/Shorts, or 16:9 sideways for YouTube), FULL, 1:1 square, 4:3
+- Logo overlay: drag, pinch, twist, opacity, in front of or behind you, per backdrop
+- Brand kit: name title (lower third), brand colour, intro card; share the kit as a .zip
+- Trim (no re-encoding) and one-tap delete and retake
+- Video backdrops (looping, silent)
+- Background music mixed under your voice, quieter while you speak
+- Live captions in the video and an .srt subtitle file (English, offline)
+- Teleprompter that follows your voice
+- Second-screen remote: watch and control from any browser on the same Wi-Fi
 
 ## Google Drive setup (one time)
 
@@ -18,29 +40,24 @@ The upload uses the Google Identity Authorization API with the narrow `drive.fil
 1. Google Cloud Console: create a project and enable **Google Drive API**.
 2. OAuth consent screen: add the `.../auth/drive.file` scope and add yourself as a test user.
 3. Credentials: create an **OAuth client ID of type Android** with package name `com.backdropcam`
-   and the SHA-1 of your signing key (`./gradlew signingReport`).
-4. No key file goes into the app. Google matches the package name and SHA-1.
+   and the SHA-1 of the signing key. The CI build uses `app/debug.keystore`:
+   `3C:7C:76:CC:B0:BC:0D:A2:02:8B:33:C5:DA:D0:5B:C6:A7:88:79:13`
 
 ## How it works
 
-| Piece | File |
+| Part | File |
 |---|---|
-| Camera at highest resolution (largest 16:9 mode the encoder also supports, up to 4K) | `MainActivity.highestResolutionSelector` |
-| Person mask, 256x256, GPU delegate, temporal smoothing | `PersonSegmenter.kt` |
-| GL pipeline: camera + mask + backdrop, edge softening, front camera mirroring | `CompositeEngine.kt` |
-| H.264 + AAC encode, MP4 into `Movies/BackdropCam` | `VideoRecorder.kt` |
-| Drive resumable upload and public link | `DriveUploader.kt` |
+| Camera screen and UI wiring | `MainActivity.kt` |
+| Lens discovery, resolution choice | `CameraLenses.kt` |
+| GPU pipeline: camera + cut-out + backdrop, orientation, edge refinement | `CompositeEngine.kt` |
+| Person segmentation (MediaPipe selfie multiclass, or the fast selfie model) | `PersonSegmenter.kt` |
+| H.264 + AAC encoding, pause, saving to the gallery | `VideoRecorder.kt` |
+| Hands-free: speech, framing coach, offline keyword spotting (Vosk) | `HandsFree.kt` |
+| Mic level test | `MicMonitor.kt` |
+| Backdrops and teleprompter scripts | `BackdropStore.kt`, `ScriptStore.kt` |
+| Google Drive upload | `DriveUploader.kt` |
+| Preferences | `AppSettings.kt` |
 
-The camera frame is composited at full resolution on the GPU. Only a small copy goes to the
-segmentation model, and its mask is up-sampled with bilinear filtering.
-
-## Tuning segmentation quality
-
-* Edge softness: `uEdge` in `CompositeEngine` (0.35 to 0.70).
-* Stability vs lag: `PersonSegmenter.smoothing`.
-* Different model: drop another MediaPipe `.tflite` into `app/src/main/assets` and change
-  `PersonSegmenter.MODEL_ASSET`. Check how many masks it returns and which index is the person.
-
-## Not built yet
-
-Video backdrops, landscape recording, tap to focus and zoom, HEVC option, timer.
+The segmentation model runs on a small copy of the exact frame being shown, so the mask always
+lines up with the picture. The camera itself is composited at full resolution, and the mask edges
+are refined on the GPU against the full-resolution colours.

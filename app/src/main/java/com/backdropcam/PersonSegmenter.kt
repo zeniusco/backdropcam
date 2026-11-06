@@ -2,109 +2,113 @@ package com.backdropcam
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.Matrix
-import androidx.camera.core.ImageAnalysis
-import androidx.camera.core.ImageProxy
+import android.os.SystemClock
+import android.util.Log
 import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.framework.image.ByteBufferExtractor
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.core.Delegate
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.imagesegmenter.ImageSegmenter
+import kotlin.math.abs
+import kotlin.math.max
 
 /**
- * Runs MediaPipe person segmentation on low-resolution analysis frames and hands
- * a smoothed person-probability mask (0..255, upright orientation) to [onMask].
+ * MediaPipe person segmentation.
  *
- * The mask is small (256x256) and is up-sampled with bilinear filtering on the GPU,
- * while the camera image itself is always composited at full camera resolution.
+ * Best quality uses the "selfie multiclass" model (background, hair, body skin, face skin,
+ * clothes, other): person = 1 - background. It finds hair and clothing edges far better than the
+ * small selfie model, which stays available as the fast option for older phones.
+ *
+ * Not thread safe: call from one thread only.
  */
-class PersonSegmenter(
-    context: Context,
-    private val onMask: (ByteArray, Int, Int) -> Unit,
-) : ImageAnalysis.Analyzer {
+class PersonSegmenter(context: Context, highQuality: Boolean, allowGpu: Boolean = true) {
 
-    private val segmenter: ImageSegmenter = create(context)
-    private var prev: FloatArray? = null
-    private var tsMs = 0L
+    class Mask(val data: ByteArray, val width: Int, val height: Int)
 
-    /** Temporal smoothing factor: higher = steadier edges, lower = less lag. */
-    var smoothing = 0.55f
+    private val appContext = context.applicationContext
+    private val model = if (highQuality) MODEL_HQ else MODEL_FAST
+    private var usingGpu = allowGpu
+    private var segmenter: ImageSegmenter = create()
+    private var lastTs = 0L
 
-    private fun create(context: Context): ImageSegmenter {
+
+
+    @Volatile private var resetRequested = false
+
+    private fun create(): ImageSegmenter {
         fun build(delegate: Delegate) = ImageSegmenter.createFromOptions(
-            context,
+            appContext,
             ImageSegmenter.ImageSegmenterOptions.builder()
-                .setBaseOptions(
-                    BaseOptions.builder()
-                        .setModelAssetPath(MODEL_ASSET)
-                        .setDelegate(delegate)
-                        .build()
-                )
+                .setBaseOptions(BaseOptions.builder().setModelAssetPath(model).setDelegate(delegate).build())
                 .setRunningMode(RunningMode.VIDEO)
                 .setOutputConfidenceMasks(true)
                 .setOutputCategoryMask(false)
                 .build()
         )
-        return try {
-            build(Delegate.GPU)
-        } catch (t: Throwable) {
-            build(Delegate.CPU)
+        if (usingGpu) {
+            try {
+                return build(Delegate.GPU)
+            } catch (t: Throwable) {
+                Log.w(TAG, "GPU delegate unavailable, using CPU", t)
+                usingGpu = false
+            }
         }
+        return build(Delegate.CPU)
     }
 
-    /** Forget the previous mask, e.g. after switching camera. */
+    /** Forget the previous mask, e.g. after the camera or orientation changed. Thread safe. */
     fun reset() {
-        prev = null
+        resetRequested = true
     }
 
-    override fun analyze(image: ImageProxy) {
-        try {
-            val rotation = image.imageInfo.rotationDegrees
-            val raw = image.toBitmap()
-            val upright = if (rotation == 0) raw else {
-                Bitmap.createBitmap(
-                    raw, 0, 0, raw.width, raw.height,
-                    Matrix().apply { postRotate(rotation.toFloat()) }, true
-                )
+    /**
+     * Segments [bitmap]. Pass [resetSmoothing] when the picture region changed (e.g. the crop
+     * around the person moved), so the previous mask is not blended in at the wrong place.
+     */
+    fun segment(bitmap: Bitmap, resetSmoothing: Boolean = false, stream: Int = 0): Mask? {
+        resetRequested = false
+        val ts = max(lastTs + 1, SystemClock.uptimeMillis())
+        lastTs = ts
+        val result = try {
+            segmenter.segmentForVideo(BitmapImageBuilder(bitmap).build(), ts)
+        } catch (t: Throwable) {
+            if (usingGpu) {
+                Log.w(TAG, "GPU inference failed, switching to CPU", t)
+                runCatching { segmenter.close() }
+                usingGpu = false
+                segmenter = create()
+                return null
             }
-            val mpImage = BitmapImageBuilder(upright).build()
-            tsMs += 33
-            val result = segmenter.segmentForVideo(mpImage, tsMs)
-            val masks = result.confidenceMasks()
-            if (masks.isPresent && masks.get().isNotEmpty()) {
-                // selfie_segmenter: index 0 = background, 1 = person when two masks are returned.
-                val list = masks.get()
-                val m = if (list.size >= 2) list[1] else list[0]
-                val fb = ByteBufferExtractor.extract(m).asFloatBuffer()
-                val n = m.width * m.height
-                val cur = FloatArray(n)
-                fb.get(cur, 0, n)
-                val p = prev
-                val out = ByteArray(n)
-                val a = smoothing
-                for (i in 0 until n) {
-                    val v = if (p != null && p.size == n) a * p[i] + (1f - a) * cur[i] else cur[i]
-                    cur[i] = v
-                    out[i] = (v.coerceIn(0f, 1f) * 255f).toInt().toByte()
-                }
-                prev = cur
-                onMask(out, m.width, m.height)
-            }
-            if (upright !== raw) raw.recycle()
-            upright.recycle()
-        } finally {
-            image.close()
+            throw t
         }
+        val masks = result.confidenceMasks()
+        if (!masks.isPresent || masks.get().isEmpty()) return null
+        val list = masks.get()
+        // With several masks, index 0 is the background: person = 1 - background.
+        val invert = list.size >= 2
+        val m = list[0]
+        val n = m.width * m.height
+        val cur = FloatArray(n)
+        ByteBufferExtractor.extract(m).asFloatBuffer().get(cur, 0, n)
+
+        // Smoothing over time is done on the graphics chip (it sees every frame); here the mask
+        // is only converted, which keeps this step fast.
+        val out = ByteArray(n)
+        for (i in 0 until n) {
+            val v = if (invert) 1f - cur[i] else cur[i]
+            out[i] = (v.coerceIn(0f, 1f) * 255f).toInt().toByte()
+        }
+        return Mask(out, m.width, m.height)
     }
 
-    fun close() = segmenter.close()
+    fun close() {
+        runCatching { segmenter.close() }
+    }
 
     companion object {
-        /**
-         * Swap this file in app/src/main/assets for a different MediaPipe segmentation model
-         * (for example deeplab_v3.tflite) to trade speed for accuracy.
-         */
-        const val MODEL_ASSET = "selfie_segmenter.tflite"
+        private const val TAG = "PersonSegmenter"
+        const val MODEL_HQ = "selfie_multiclass_256x256.tflite"
+        const val MODEL_FAST = "selfie_segmenter.tflite"
     }
 }
