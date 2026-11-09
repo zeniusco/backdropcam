@@ -1243,6 +1243,7 @@ class MainActivity : AppCompatActivity() {
                 },
                 // In hands-free mode the recording's own sound is checked for "stop".
                 preferHevc = settings.smallFiles,
+                voiceIsolation = settings.voiceIsolation,
             )
             rec.start()
             engine.startRecording(rec.inputSurface, size.width, size.height, rotation, { rec.ptsNs() }, { rec.paused })
@@ -1411,6 +1412,11 @@ class MainActivity : AppCompatActivity() {
         val dlg = BottomSheetDialog(this)
         dlg.setContentView(b.root)
         b.micSwitch.isChecked = settings.micOn
+        b.isolationSwitch.isChecked = settings.voiceIsolation
+        b.isolationSwitch.setOnCheckedChangeListener { _, on ->
+            settings.voiceIsolation = on
+            hint(if (on) "Voice isolation on" else "Voice isolation off: all sounds are recorded")
+        }
         b.gainSlider.value = ((settings.micGain * 100f).coerceIn(0f, 200f) / 5f).roundToInt() * 5f
         b.gainValue.text = "${b.gainSlider.value.toInt()}%"
         b.micSwitch.setOnCheckedChangeListener { _, on ->

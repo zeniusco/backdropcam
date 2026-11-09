@@ -57,6 +57,11 @@ class AppSettings(context: Context) {
         get() = p.getBoolean("micOn", true)
         set(v) = p.edit().putBoolean("micOn", v).apply()
 
+    /** Remove background noise (fans, traffic, hum) from recordings, keeping the voice. On by default. */
+    var voiceIsolation: Boolean
+        get() = p.getBoolean("voiceIsolation", true)
+        set(v) = p.edit().putBoolean("voiceIsolation", v).apply()
+
     /** 1.0 = 100 % */
     var micGain: Float
         get() = p.getFloat("micGain", 1f)

@@ -47,6 +47,8 @@ class VideoRecorder(
     private val fps: Int = 30,
     /** Use H.265/HEVC (about half the file size) when the phone can encode this size with it. */
     preferHevc: Boolean = true,
+    /** Remove background noise from the sound, keeping the voice. */
+    voiceIsolation: Boolean = true,
 ) {
     /** "video/hevc" or "video/avc", whichever is used for this recording. */
     val videoMime: String = if (preferHevc && hevcSupports(width, height)) MediaFormat.MIMETYPE_VIDEO_HEVC else MediaFormat.MIMETYPE_VIDEO_AVC
@@ -86,6 +88,9 @@ class VideoRecorder(
     private val resolver = appContext.contentResolver
     val startNs = System.nanoTime()
     val displayName = "BackdropCam_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".mp4"
+
+    private val isolation: VoiceIsolation? =
+        if (voiceIsolation && withAudio) VoiceIsolation().takeIf { it.available } else null
 
     lateinit var inputSurface: Surface
         private set
@@ -191,6 +196,7 @@ class VideoRecorder(
         videoCodec.release()
         audioCodec?.run { runCatching { stop() }; release() }
         audioRecord?.run { runCatching { stop() }; release() }
+        isolation?.close()
         runCatching { inputSurface.release() }
         val ok = sink.stop()
         val why = failure ?: "Recording was too short"
@@ -289,6 +295,8 @@ class VideoRecorder(
                                 }
                                 val ptsUs = audioBaseUs + audioSamples * 1_000_000L / SAMPLE_RATE
                                 audioSamples += n
+                                // Clean the noise first, so the volume boost does not raise it too.
+                                isolation?.process(pcm, n)
                                 val level = AudioLevel.process(pcm, n, gain(), muted())
                                 val now = System.currentTimeMillis()
                                 if (now - lastLevelMs > 60) {
