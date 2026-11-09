@@ -17,10 +17,13 @@ class AppSettings(context: Context) {
             android.os.Build.VERSION.SDK_INT < 29 || Runtime.getRuntime().availableProcessors() < 6
     }
 
-    /** "max", "1080" or "720" */
+    /**
+     * "max", "1080" or "720". Starts at 1080p (720p on weak phones): 4K means 4 times the work for
+     * every frame, which made recording and the whole app lag. 4K stays one tap away.
+     */
     var quality: String
-        get() = p.getString("quality", if (lowEndPhone) "1080" else "max")!!
-        set(v) = p.edit().putString("quality", v).apply()
+        get() = p.getString("quality2", if (lowEndPhone) "720" else "1080")!!
+        set(v) = p.edit().putString("quality2", v).apply()
 
     /**
      * "Best edges" model. Off by default: the fast model keeps up with every frame on every phone,
@@ -99,7 +102,7 @@ class AppSettings(context: Context) {
     fun enterSafeMode() {
         p.edit()
             .putBoolean("safeMode", true)
-            .putString("quality", "720")
+            .putString("quality2", "720")
             .putBoolean("hq2", false)
             .putBoolean("sessionOpen", false)
             .commit()

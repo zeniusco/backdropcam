@@ -660,6 +660,7 @@ class CompositeEngine(context: Context) {
     }
 
     private fun handleCameraFrame() {
+        if (reads.isNotEmpty()) pollReads()
         val st = cameraTexture ?: return
         makeCurrentAny()
         try {
@@ -713,6 +714,7 @@ class CompositeEngine(context: Context) {
         GLES30.glGenerateMipmap(GLES30.GL_TEXTURE_2D)
 
         val now = SystemClock.uptimeMillis()
+        statCamFrames++
         slot.id = ++frameCounter
         slot.pending = true
         slot.capturedMs = now
@@ -762,7 +764,7 @@ class CompositeEngine(context: Context) {
     }
 
     private val inFlight = java.util.concurrent.atomic.AtomicInteger(0)
-    private val bitmapPool = java.util.concurrent.ArrayBlockingQueue<Bitmap>(2)
+    private val bitmapPool = java.util.concurrent.ArrayBlockingQueue<Bitmap>(3)
     private var bitmapsMade = 0
     private val detectExecutor = Executors.newSingleThreadExecutor()
     private val detectBusy = AtomicBoolean(false)
@@ -771,93 +773,124 @@ class CompositeEngine(context: Context) {
     /** The whole-picture mask is from an older frame (only the close-up is current). */
     private var fullStale = false
 
-    private fun takeBitmap(): Bitmap? = bitmapPool.poll() ?: if (bitmapsMade < 2) {
+    private fun takeBitmap(): Bitmap? = bitmapPool.poll() ?: if (bitmapsMade < 3) {
         bitmapsMade++
         Bitmap.createBitmap(ROI_SIZE, ROI_SIZE, Bitmap.Config.ARGB_8888)
     } else null
 
+    // Picture for the model is read back WITHOUT waiting: the graphics chip copies it into a
+    // buffer in the background (a "pixel buffer"), and the model gets it a moment later. Before,
+    // the app stopped every frame until the graphics chip had finished all its work.
+    private class PendingRead(val id: Long, val pbo: Int, val fence: Long, val roi: FloatArray, val changed: Boolean, val gen: Int)
+    private val reads = ArrayDeque<PendingRead>()
+    private val pbos = IntArray(3)
+    private var pboNext = 0
+    private var pollScheduled = false
+    private val pollRunnable = Runnable { pollScheduled = false; pollReads() }
+
+    private fun schedulePoll() {
+        if (pollScheduled) return
+        pollScheduled = true
+        handler.postDelayed(pollRunnable, 3)
+    }
+
     /**
-     * Segments [slot] with ONE model pass: a detailed close-up around the person (chosen from the
-     * previous result, with room to move), or the whole picture when the person is not found
-     * yet, nears the close-up's edge, or on weak phones. The frame is then shown and recorded
-     * with the cut-out made from itself. Returns false if it could not be started.
+     * Starts the cut-out of [slot] (one model pass over the whole picture). When it is done, the
+     * frame is shown and recorded with the cut-out made from itself. Returns false if it could
+     * not be started.
      */
     private fun submitSegmentation(slot: Slot): Boolean {
+        if (inFlight.get() >= 2) return false
         val (ww, wh) = worldSize()
-        val full = fullRoi(ww, wh)
-        // Always the whole picture. A close-up crop gave more detail, but when the model missed
-        // part of you for a moment (a light shirt against a bright window), the crop shrank and
-        // everything outside it was cut away with straight edges. The whole picture never can.
-        val crop: FloatArray? = null
-        val isCrop = crop != null
-        val roi = crop ?: full
-        val changed = if (isCrop) lastRoi?.contentEquals(roi) != true else lastFullRoi?.contentEquals(roi) != true
-        if (isCrop) lastRoi = roi else lastFullRoi = roi
-        val bmp = takeBitmap() ?: return false
-        readCrop(slot, roi, bmp)
-        inFlight.incrementAndGet()
-
-        // Now and then, look at the whole picture in the background (not shown) so someone
-        // stepping in at the side, or a hand far out, makes the close-up grow.
-        if (isCrop && fullSegmenter != null && ++framesSinceDetect >= DETECT_EVERY && detectBusy.compareAndSet(false, true)) {
-            framesSinceDetect = 0
-            val dBmp = detectBitmap ?: Bitmap.createBitmap(ROI_SIZE, ROI_SIZE, Bitmap.Config.ARGB_8888).also { detectBitmap = it }
-            readCrop(slot, full, dBmp)
-            val mirroredView = isFront && mirrorFront
-            val gen0 = maskGen
-            try {
-                detectExecutor.execute {
-                    try {
-                        val m = fullSegmenter?.segment(dBmp, resetSmoothing = true, stream = 0)
-                        // Ignore results from before a rotation or camera switch.
-                        if (m != null && gen0 == maskGen) {
-                            nextRoi = chooseNextRoi(m, full, ww, wh, true)
-                            reportFraming(m, dBmp, full, mirroredView)
-                        }
-                    } catch (t: Throwable) {
-                        Log.e(TAG, "detection failed", t)
-                    } finally {
-                        detectBusy.set(false)
-                    }
-                }
-            } catch (e: RejectedExecutionException) {
-                detectBusy.set(false)
+        if (ww == 0 || wh == 0) return false
+        if (pbos[0] == 0) {
+            GLES30.glGenBuffers(3, pbos, 0)
+            for (p in pbos) {
+                GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, p)
+                GLES30.glBufferData(GLES30.GL_PIXEL_PACK_BUFFER, ROI_SIZE * ROI_SIZE * 4, null, GLES30.GL_STREAM_READ)
             }
+            GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0)
         }
+        val roi = fullRoi(ww, wh)
+        val changed = lastFullRoi?.contentEquals(roi) != true
+        lastFullRoi = roi
 
-        val id = slot.id
-        val gen = maskGen
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, roiFbo)
+        val wFromOut = identity().also {
+            Matrix.translateM(it, 0, roi[0], roi[3], 0f)
+            Matrix.scaleM(it, 0, roi[2] - roi[0], -(roi[3] - roi[1]), 1f)
+        }
+        render(ROI_SIZE, ROI_SIZE, wFromOut, MODE_RAW, slot.tex)
+        val pbo = pbos[pboNext]
+        pboNext = (pboNext + 1) % pbos.size
+        GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, pbo)
+        GLES30.glReadPixels(0, 0, ROI_SIZE, ROI_SIZE, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, 0)
+        GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0)
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+        val fence = GLES30.glFenceSync(GLES30.GL_SYNC_GPU_COMMANDS_COMPLETE, 0)
+        GLES30.glFlush()
+        reads.addLast(PendingRead(slot.id, pbo, fence, roi, changed, maskGen))
+        inFlight.incrementAndGet()
+        schedulePoll()
+        return true
+    }
+
+    /** Hands every finished read-back to the model, oldest first, without ever waiting. */
+    private fun pollReads() {
+        while (reads.isNotEmpty()) {
+            val r = reads.first()
+            val status = GLES30.glClientWaitSync(r.fence, 0, 0)
+            if (status == GLES30.GL_TIMEOUT_EXPIRED) {
+                schedulePoll()
+                return
+            }
+            reads.removeFirst()
+            GLES30.glDeleteSync(r.fence)
+            val bmp = takeBitmap() ?: Bitmap.createBitmap(ROI_SIZE, ROI_SIZE, Bitmap.Config.ARGB_8888)
+            makeCurrentAny()
+            GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, r.pbo)
+            val mapped = GLES30.glMapBufferRange(GLES30.GL_PIXEL_PACK_BUFFER, 0, ROI_SIZE * ROI_SIZE * 4, GLES30.GL_MAP_READ_BIT) as? ByteBuffer
+            if (mapped != null) {
+                mapped.order(ByteOrder.nativeOrder())
+                bmp.copyPixelsFromBuffer(mapped)
+                GLES30.glUnmapBuffer(GLES30.GL_PIXEL_PACK_BUFFER)
+            }
+            GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0)
+            if (mapped == null) {
+                bitmapPool.offer(bmp)
+                inFlight.decrementAndGet()
+                presentPendingUpTo(r.id)
+                continue
+            }
+            runModel(r, bmp)
+        }
+    }
+
+    private fun runModel(r: PendingRead, bmp: Bitmap) {
+        val (ww, wh) = worldSize()
         val mirroredView = isFront && mirrorFront
         try {
             segExecutor.execute {
                 var mask: PersonSegmenter.Mask? = null
                 try {
                     val t0 = SystemClock.uptimeMillis()
-                    mask = segmenter?.segment(bmp, resetSmoothing = changed, stream = if (isCrop) 1 else 0)
+                    mask = segmenter?.segment(bmp, resetSmoothing = r.changed, stream = 0)
                     noteSegmentationTime(SystemClock.uptimeMillis() - t0)
-                    if (mask != null && gen == maskGen) {
-                        nextRoi = chooseNextRoi(mask, roi, ww, wh, !isCrop)
-                        if (!isCrop) reportFraming(mask, bmp, roi, mirroredView)
-                    }
+                    if (mask != null && r.gen == maskGen) reportFraming(mask, bmp, r.roi, mirroredView)
                 } catch (t: Throwable) {
                     Log.e(TAG, "segmentation failed", t)
                 } finally {
                     val m = mask
                     handler.post {
                         val t1 = SystemClock.uptimeMillis()
-                        if (gen == maskGen && m != null) {
-                            if (isCrop) {
-                                uploadMask(m, roi, false)
-                                fullStale = true
-                            } else {
-                                uploadMask(m, roi, true)
-                                roiReady = false
-                                fullStale = false
-                            }
+                        if (r.gen == maskGen && m != null) {
+                            uploadMask(m, r.roi, true)
+                            roiReady = false
+                            fullStale = false
                         }
                         // Show and record this frame with its own cut-out (and any frame just
                         // before it that could not be sent, with this very close one).
-                        presentPendingUpTo(id)
+                        presentPendingUpTo(r.id)
                         bitmapPool.offer(bmp)
                         inFlight.decrementAndGet()
                         // The newest frame still waiting goes to the model straight away.
@@ -869,11 +902,9 @@ class CompositeEngine(context: Context) {
                 }
             }
         } catch (e: RejectedExecutionException) {
-            inFlight.decrementAndGet()
             bitmapPool.offer(bmp)
-            return false
+            inFlight.decrementAndGet()
         }
-        return true
     }
 
     /**
@@ -1028,7 +1059,30 @@ class CompositeEngine(context: Context) {
         }
     }
 
+    // ---- speed readout (shown on screen when switched on)
+    @Volatile var statsText = ""
+    private var statFrames = 0
+    private var statCamFrames = 0
+    private var statStart = 0L
+
+    private fun countPresented() {
+        statFrames++
+        val now = SystemClock.uptimeMillis()
+        if (statStart == 0L) statStart = now
+        val span = now - statStart
+        if (span >= 1000) {
+            val fps = statFrames * 1000f / span
+            val cam = statCamFrames * 1000f / span
+            statsText = String.format(
+                java.util.Locale.US, "%.0f fps shown  ·  %.0f fps camera  ·  cut-out %.0f ms  ·  %dx%d",
+                fps, cam, segTimeAvg, naturalWidth, naturalHeight,
+            )
+            statFrames = 0; statCamFrames = 0; statStart = now
+        }
+    }
+
     private fun present(slot: Slot) {
+        countPresented()
         slot.pending = false
         makeCurrentAny()
         computeAlpha(slot)
@@ -1063,10 +1117,17 @@ class CompositeEngine(context: Context) {
                 GLES30.glGenTextures(2, alphaTex, 0)
                 GLES30.glGenFramebuffers(2, alphaFbo, 0)
             }
+            if (alphaW != 0) {
+                // Storage of a fixed size cannot be resized: make fresh textures.
+                GLES30.glDeleteTextures(2, alphaTex, 0)
+                GLES30.glGenTextures(2, alphaTex, 0)
+            }
             for (i in 0..1) {
                 GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, alphaTex[i])
-                GLES30.glTexImage2D(GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA, w, h, 0, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, null)
+                // With smaller copies (mipmaps), so the soft edge is one cheap lookup.
+                GLES30.glTexStorage2D(GLES30.GL_TEXTURE_2D, 4, GLES30.GL_RGBA8, w, h)
                 setLinear(GLES30.GL_TEXTURE_2D)
+                GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_LINEAR_MIPMAP_LINEAR)
                 GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, alphaFbo[i])
                 GLES30.glFramebufferTexture2D(GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0, GLES30.GL_TEXTURE_2D, alphaTex[i], 0)
             }
@@ -1078,6 +1139,8 @@ class CompositeEngine(context: Context) {
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, alphaFbo[next])
         render(alphaW, alphaH, identity(), MODE_ALPHA, slot.tex)
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, alphaTex[next])
+        GLES30.glGenerateMipmap(GLES30.GL_TEXTURE_2D)
         alphaCur = next
         alphaHasPrev = true
         alphaReady = true
@@ -1671,7 +1734,7 @@ void main() {
         // as movement.
         float chroma = (soft.r - soft.b) * 0.5 + 0.5;
         if (uHasPrev > 0.5) {
-            vec4 prev = texture(uAlphaPrev, vW);
+            vec4 prev = textureLod(uAlphaPrev, vW, 0.0);
             float moved = max(abs(luma - prev.g), abs(chroma - prev.b));
             float k = 0.7 * (1.0 - smoothstep(0.012, 0.04, moved));
             // Only small wobbles are steadied. A big change (your hand has left this spot, or
@@ -1703,16 +1766,12 @@ void main() {
             // Steadied cut-out from the alpha pass.
             vec2 pc = clamp(p, 0.0, 1.0);
             float a = texture(uAlpha, pc).r;
-            // How much of the area just around this point is you (8 taps on a small ring).
-            float ring = 0.0;
-            for (int k = 0; k < 8; k++) {
-                float ang = float(k) * 0.785398;
-                ring += texture(uAlpha, clamp(pc + vec2(cos(ang), sin(ang)) * uWrapR, 0.0, 1.0)).r;
-            }
-            ring /= 8.0;
+            // How much of the area just around this point is you: one lookup in a smaller,
+            // smoothed copy of the cut-out (about a 6 pixel neighbourhood).
+            float ring = textureLod(uAlpha, pc, 2.3).r;
             // Softer outline: blend a little of the surrounding cut-out into the edge, so small
             // errors read as natural soft focus instead of a hard cut.
-            m = mix(a, ring, 0.35);
+            m = mix(a, ring, 0.5);
             // Light wrap: on your side of the edge, close to the background, let some of the new
             // background's light fall onto you, as real light would.
             wrap = a * (1.0 - ring);
@@ -1757,7 +1816,7 @@ void main() {
     vec3 you = adjust(cam);
     // Light wrap (screen-style, so it only ever brightens or tints a little, never darkens you).
     vec3 lit = 1.0 - (1.0 - you) * (1.0 - bg * 0.55);
-    you = mix(you, lit, wrap * 0.6);
+    you = mix(you, lit, wrap * 0.35);
     vec3 c;
     if (uLogoBehind > 0.5) {
         c = mix(withLogo(bg), you, m);   // logo on the wall, behind you

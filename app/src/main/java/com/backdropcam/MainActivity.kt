@@ -336,6 +336,43 @@ class MainActivity : AppCompatActivity() {
         hint("It's quite dark here. Face a window or a lamp, or turn on more lights, for a sharper video and a cleaner cut-out.")
     }
 
+    private var statsView: TextView? = null
+    private val statsTick = object : Runnable {
+        override fun run() {
+            val v = statsView ?: return
+            v.text = engine.statsText.ifBlank { "Measuring…" }
+            main.postDelayed(this, 500)
+        }
+    }
+
+    private fun toggleStats() {
+        val existing = statsView
+        if (existing != null) {
+            ui.root.removeView(existing)
+            statsView = null
+            main.removeCallbacks(statsTick)
+            return
+        }
+        val v = TextView(this).apply {
+            textSize = 12f
+            setTextColor(0xFFFFFFFF.toInt())
+            setBackgroundColor(0x99000000.toInt())
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+            layoutParams = ConstraintLayout.LayoutParams(
+                ConstraintLayout.LayoutParams.WRAP_CONTENT, ConstraintLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topToBottom = ui.topBar.id
+                startToStart = ConstraintLayout.LayoutParams.PARENT_ID
+                marginStart = dp(12)
+                topMargin = dp(4)
+            }
+        }
+        ui.root.addView(v)
+        statsView = v
+        main.post(statsTick)
+        hint("Speed readout on. Long-press the quality button again to hide it.")
+    }
+
     /** Long 4K recordings make phones hot; say so before the phone itself slows down. */
     private fun watchTemperature() {
         if (Build.VERSION.SDK_INT < 29) return
@@ -447,6 +484,8 @@ class MainActivity : AppCompatActivity() {
         ui.flashBtn.setOnClickListener { toggleTorch() }
         ui.aspectChip.setOnClickListener { cycleViewMode() }
         ui.qualityChip.setOnClickListener { cycleQuality() }
+        // Long-press: show or hide a small speed readout (frames per second, cut-out time).
+        ui.qualityChip.setOnLongClickListener { toggleStats(); true }
         ui.timerChip.setOnClickListener { cycleTimer() }
         ui.micBtn.setOnClickListener { onMicPressed() }
         ui.tuneBtn.setOnClickListener { setAdjustOpen(!adjustOpen) }
