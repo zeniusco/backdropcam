@@ -11,8 +11,10 @@ android {
         applicationId = "com.backdropcam"
         minSdk = 26
         targetSdk = 35
-        versionCode = 47
-        versionName = "1.0.47"
+        // Version follows the build number: build 52 is version 1.0.52 (release v1.0.52).
+        val buildNumber = (System.getenv("GITHUB_RUN_NUMBER") ?: "47").toInt()
+        versionCode = buildNumber
+        versionName = "1.0.$buildNumber"
         // Phones only (keeps the app smaller than also shipping emulator x86 code)
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
     }
