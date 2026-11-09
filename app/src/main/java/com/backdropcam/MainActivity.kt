@@ -864,11 +864,7 @@ class MainActivity : AppCompatActivity() {
         io.execute {
             try {
                 val gpu = !settings.safeMode
-                val closeUpModel = PersonSegmenter(this, hq, allowGpu = gpu)
-                // A light second model for the whole picture, next to the detailed close-up.
-                // Weak phones run only one pass, so they skip it.
-                val whole = if (settings.lowEndPhone || settings.safeMode) null else PersonSegmenter(this, false, allowGpu = gpu)
-                engine.setSegmenter(closeUpModel, whole)
+                engine.setSegmenter(PersonSegmenter(this, hq, allowGpu = gpu))
             } catch (e: Exception) {
                 main.post { hint("Could not load the cut-out model") }
             }

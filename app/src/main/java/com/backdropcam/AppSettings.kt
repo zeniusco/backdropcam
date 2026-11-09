@@ -186,24 +186,3 @@ class AppSettings(context: Context) {
         }
 }
 
-/**
- * Where the logo sits, in the visible picture: centre (0..1, y up), width as a fraction of the
- * picture width, rotation in degrees (counter-clockwise), opacity 0..1, and behind the person.
- */
-data class LogoPlacement(
-    val x: Float = 0.80f,
-    val y: Float = 0.88f,
-    val size: Float = 0.28f,
-    val rotation: Float = 0f,
-    val opacity: Float = 1f,
-    val behind: Boolean = false,
-) {
-    override fun toString() = "$x,$y,$size,$rotation,$opacity,$behind"
-
-    companion object {
-        fun parse(s: String): LogoPlacement? = runCatching {
-            val p = s.split(",")
-            LogoPlacement(p[0].toFloat(), p[1].toFloat(), p[2].toFloat(), p[3].toFloat(), p[4].toFloat(), p[5].toBoolean())
-        }.getOrNull()
-    }
-}
