@@ -12,5 +12,5 @@ add_library(voiceiso SHARED
     rnnoise/kiss_fft.c
     rnnoise/celt_lpc.c)
 target_include_directories(voiceiso PRIVATE rnnoise)
-target_compile_options(voiceiso PRIVATE -O3 -ffast-math -w)
+target_compile_options(voiceiso PRIVATE -O3 -w)
 target_link_libraries(voiceiso m)
