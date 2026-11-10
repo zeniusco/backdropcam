@@ -23,14 +23,14 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
-            android:hint="Your name (optional, added to video file names)">
+            android:hint="Your first name (optional, added to video file names)">
 
             <com.google.android.material.textfield.TextInputEditText
                 android:id="@+id/personName"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:inputType="textPersonName|textCapWords"
-                android:maxLength="40"
+                android:maxLength="30"
                 android:maxLines="1" />
         </com.google.android.material.textfield.TextInputLayout>
 

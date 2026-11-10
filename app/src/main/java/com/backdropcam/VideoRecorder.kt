@@ -436,12 +436,12 @@ class VideoRecorder(
         const val SAMPLE_RATE = 48000
 
         /**
-         * A name made safe for a file name: letters (any language), digits, '-' and '_' kept,
-         * spaces become '_', everything else dropped, at most 40 characters.
+         * The first name, made safe for a file name: only the first word is used, letters (any
+         * language), digits and '-' are kept, everything else dropped, at most 30 characters.
          */
         fun fileNamePart(name: String): String =
-            name.trim().replace(Regex("\\s+"), "_").replace(Regex("[^\\p{L}\\p{N}_-]"), "")
-                .take(40).trim('_', '-')
+            name.trim().split(Regex("\\s+")).firstOrNull().orEmpty()
+                .replace(Regex("[^\\p{L}\\p{N}-]"), "").take(30).trim('-')
 
         /** The H.264 encoder's limits, looked up once (enumerating codecs is slow). */
         private val avcCapsCache: MediaCodecInfo.VideoCapabilities? by lazy {
