@@ -39,14 +39,14 @@ object Trimmer {
     /** Writes [startUs]..[endUs] of [src] as a new gallery video and returns its URI. */
     fun trim(context: Context, src: Uri, startUs: Long, endUs: Long): Uri {
         val resolver = context.contentResolver
-        val name = "BackdropCam_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + "_trim.mp4"
+        val name = "BackdropKit_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + "_trim.mp4"
         var pending: Uri? = null
         var file: File? = null
         val pfd = if (Build.VERSION.SDK_INT >= 29) {
             val values = ContentValues().apply {
                 put(MediaStore.Video.Media.DISPLAY_NAME, name)
                 put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-                put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/BackdropCam")
+                put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/BackdropKit")
                 put(MediaStore.Video.Media.IS_PENDING, 1)
             }
             pending = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values) ?: error("Cannot create gallery entry")
@@ -56,7 +56,7 @@ object Trimmer {
             MediaMuxer(pfd.fileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
         } else {
             @Suppress("DEPRECATION")
-            val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES), "BackdropCam")
+            val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES), "BackdropKit")
             dir.mkdirs()
             file = File(dir, name)
             MediaMuxer(file.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)

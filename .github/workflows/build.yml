@@ -19,13 +19,13 @@ jobs:
       - run: gradle :app:assembleDebug --stacktrace
       - uses: actions/upload-artifact@v4
         with:
-          name: BackdropCam-apk
+          name: BackdropKit.apk
           path: app/build/outputs/apk/debug/app-debug.apk
       - name: Publish APK as a GitHub Release (easy download on phones)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          cp app/build/outputs/apk/debug/app-debug.apk BackdropCam.apk
+          cp app/build/outputs/apk/debug/app-debug.apk BackdropKit.apk
           # Release name = the app's own version, so the page and the app always match. A fixed
           # versionName (e.g. "1.0.47" on release/v1) is used as is; otherwise 1.0.<build number>.
           VERSION=$(grep -oP 'versionName = "\K[0-9.]+(?=")' app/build.gradle.kts || true)
@@ -34,11 +34,11 @@ jobs:
           # GitHub's release API sometimes returns a temporary 500; retry a few times.
           for attempt in 1 2 3 4; do
             gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
-            if gh release create "$TAG" BackdropCam.apk \
+            if gh release create "$TAG" BackdropKit.apk \
                 --target "${{ github.sha }}" \
                 --prerelease \
-                --title "BackdropCam $VERSION (${{ github.ref_name }})" \
-                --notes "Version $VERSION from ${{ github.ref_name }}, commit ${{ github.sha }}. Download BackdropCam.apk and install it."; then
+                --title "BackdropKit $VERSION (${{ github.ref_name }})" \
+                --notes "Version $VERSION from ${{ github.ref_name }}, commit ${{ github.sha }}. Download BackdropKit.apk and install it."; then
               exit 0
             fi
             echo "Release attempt $attempt failed, retrying"

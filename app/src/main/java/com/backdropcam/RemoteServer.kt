@@ -142,7 +142,7 @@ class RemoteServer(
                 if (!MessageDigest.isEqual(given, keyBytes)) {
                     // A few mistakes are fine; then this address must wait before trying again.
                     if (++st.count >= 5) { st.blockedUntil = now + 60_000; st.count = 0 }
-                    return send(out, 403, "text/plain", "Open the link shown in BackdropCam.".toByteArray())
+                    return send(out, 403, "text/plain", "Open the link shown in BackdropKit.".toByteArray())
                 }
                 st.count = 0
                 when (path) {
@@ -202,7 +202,7 @@ class RemoteServer(
 
     private fun page() = """<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>BackdropCam monitor</title>
+<title>BackdropKit monitor</title>
 <style>
 :root{color-scheme:dark}
 *{box-sizing:border-box}

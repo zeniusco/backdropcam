@@ -33,7 +33,7 @@ class DriveUploader(private val resolver: ContentResolver, private val accessTok
         if (size <= 0) throw IOException("Cannot read the video's size")
         val name = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
             if (c.moveToFirst()) c.getString(0) else null
-        } ?: "BackdropCam.mp4"
+        } ?: "BackdropKit.mp4"
 
         // 1. Start a resumable session
         val meta = JSONObject().put("name", name).put("mimeType", "video/mp4").toString()

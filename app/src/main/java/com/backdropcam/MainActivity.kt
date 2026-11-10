@@ -143,7 +143,7 @@ class MainActivity : AppCompatActivity() {
             if (grants[Manifest.permission.CAMERA] == true) bindCamera()
             else MaterialAlertDialogBuilder(this)
                 .setTitle("Camera access needed")
-                .setMessage("BackdropCam records with the camera, so it cannot work without it. Allow Camera (and Microphone for sound) in the app's settings.")
+                .setMessage("BackdropKit records with the camera, so it cannot work without it. Allow Camera (and Microphone for sound) in the app's settings.")
                 .setPositiveButton("Open settings") { _, _ ->
                     startActivitySafe(
                         Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null))
@@ -262,7 +262,7 @@ class MainActivity : AppCompatActivity() {
     private fun showCrashNotice() {
         val report = CrashGuard.lastReport(this)
         val b = MaterialAlertDialogBuilder(this)
-            .setTitle("BackdropCam closed unexpectedly")
+            .setTitle("BackdropKit closed unexpectedly")
             .setMessage(
                 "It has restarted with lighter settings for this phone: 720p, Fast cut-out, and the " +
                     "cut-out running on the processor instead of the graphics chip. You can raise them again in Settings." +
@@ -273,7 +273,7 @@ class MainActivity : AppCompatActivity() {
             startActivitySafe(
                 Intent.createChooser(
                     Intent(Intent.ACTION_SEND).setType("text/plain")
-                        .putExtra(Intent.EXTRA_SUBJECT, "BackdropCam error report")
+                        .putExtra(Intent.EXTRA_SUBJECT, "BackdropKit error report")
                         .putExtra(Intent.EXTRA_TEXT, report),
                     "Send report"
                 )
@@ -474,7 +474,7 @@ class MainActivity : AppCompatActivity() {
         ui.flipBtn.setOnClickListener { flipCamera() }
         ui.lastThumb.setOnClickListener { lastVideo?.let { showResultSheet(it) } ?: hint("No recordings yet") }
         ui.lastThumb.setOnLongClickListener {
-            // All recordings live in the gallery under Movies/BackdropCam.
+            // All recordings live in the gallery under Movies/BackdropKit.
             startActivitySafe(
                 Intent(Intent.ACTION_VIEW).setDataAndType(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, "video/*")
             )
@@ -1195,7 +1195,7 @@ class MainActivity : AppCompatActivity() {
         val (ww, wh) = if (rotation % 180 == 0) cw to ch else ch to cw
         val size = VideoRecorder.pickEncoderSize(ww, wh)
         val audio = settings.micOn && granted(Manifest.permission.RECORD_AUDIO)
-        if (settings.micOn && !audio) hint("Recording without sound: microphone access is not allowed for BackdropCam")
+        if (settings.micOn && !audio) hint("Recording without sound: microphone access is not allowed for BackdropKit")
 
         micMonitor?.stop()
         micMonitor = null
@@ -1307,7 +1307,7 @@ class MainActivity : AppCompatActivity() {
         settings.lastVideo = uri.toString()
         loadThumbInto(uri, ui.lastThumb)
         if (isFinishing || isDestroyed) return
-        showResultSheet(uri, "${rec.width} × ${rec.height} · Movies/BackdropCam")
+        showResultSheet(uri, "${rec.width} × ${rec.height} · Movies/BackdropKit")
         if (settings.autoUpload && settings.driveInApp) startUpload()
     }
 
@@ -1461,7 +1461,7 @@ class MainActivity : AppCompatActivity() {
         val dlg = BottomSheetDialog(this)
         dlg.setContentView(b.root)
         resultUi = b
-        b.details.text = details ?: "Movies/BackdropCam"
+        b.details.text = details ?: "Movies/BackdropKit"
         b.thumb.roundCorners(dp(16))
         loadThumbInto(uri, b.thumb)
         b.playBtn.setOnClickListener { playVideo(uri) }

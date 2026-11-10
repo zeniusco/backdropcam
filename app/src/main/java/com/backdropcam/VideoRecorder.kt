@@ -34,7 +34,7 @@ import kotlin.math.sqrt
 
 /**
  * Encodes the composited GL output (H.264 through an input Surface) plus microphone audio (AAC)
- * into an MP4 in the gallery (Movies/BackdropCam). Works on Android 8.0 and newer.
+ * into an MP4 in the gallery (Movies/BackdropKit). Works on Android 8.0 and newer.
  */
 class VideoRecorder(
     context: Context,
@@ -87,7 +87,7 @@ class VideoRecorder(
     private val appContext = context.applicationContext
     private val resolver = appContext.contentResolver
     val startNs = System.nanoTime()
-    val displayName = "BackdropCam_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".mp4"
+    val displayName = "BackdropKit_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".mp4"
 
     private val isolation: VoiceIsolation? =
         if (voiceIsolation && withAudio) VoiceIsolation().takeIf { it.available } else null
@@ -113,7 +113,7 @@ class VideoRecorder(
             val values = ContentValues().apply {
                 put(MediaStore.Video.Media.DISPLAY_NAME, displayName)
                 put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-                put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/BackdropCam")
+                put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/BackdropKit")
                 put(MediaStore.Video.Media.IS_PENDING, 1)
             }
             val uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
@@ -124,7 +124,7 @@ class VideoRecorder(
             MediaMuxer(fd.fileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
         } else {
             @Suppress("DEPRECATION")
-            val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES), "BackdropCam")
+            val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES), "BackdropKit")
             dir.mkdirs()
             val f = File(dir, displayName)
             file = f
