@@ -8,7 +8,7 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.backdropkit"
+        applicationId = "net.backdropkit"
         minSdk = 26
         // Google Play requires new apps to target the latest Android (16).
         targetSdk = 36
