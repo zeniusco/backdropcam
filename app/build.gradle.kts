@@ -8,7 +8,7 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.backdropcam"
+        applicationId = "com.backdropkit"
         minSdk = 26
         targetSdk = 35
         // Version follows the build number: build 52 is version 1.0.52 (release v1.0.52).
