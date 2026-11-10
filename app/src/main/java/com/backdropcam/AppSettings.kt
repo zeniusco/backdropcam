@@ -172,22 +172,6 @@ class AppSettings(context: Context) {
         get() = p.getInt("autoStop", 0)
         set(v) = p.edit().putInt("autoStop", v).apply()
 
-    var teleOn: Boolean
-        get() = p.getBoolean("teleOn", true)
-        set(v) = p.edit().putBoolean("teleOn", v).apply()
-
-    var teleSpeed: Int
-        get() = p.getInt("teleSpeed", 4)
-        set(v) = p.edit().putInt("teleSpeed", v).apply()
-
-    var teleSize: Int
-        get() = p.getInt("teleSize", 28)
-        set(v) = p.edit().putInt("teleSize", v).apply()
-
-    var teleScript: String?
-        get() = p.getString("teleScript", null)
-        set(v) = p.edit().putString("teleScript", v).apply()
-
     /** H.265/HEVC for about half the file size; off = H.264 for very old players. */
     var smallFiles: Boolean
         get() = p.getBoolean("smallFiles", true)

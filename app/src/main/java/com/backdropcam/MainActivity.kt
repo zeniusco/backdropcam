@@ -69,12 +69,10 @@ import androidx.core.widget.ImageViewCompat
 import androidx.core.widget.doAfterTextChanged
 import androidx.core.widget.TextViewCompat
 import com.backdropcam.databinding.ActivityMainBinding
-import com.backdropcam.databinding.DialogScriptBinding
 import com.backdropcam.databinding.DialogTrimBinding
 import com.backdropcam.databinding.SheetRemoteBinding
 import com.backdropcam.databinding.SheetMicBinding
 import com.backdropcam.databinding.SheetResultBinding
-import com.backdropcam.databinding.SheetScriptsBinding
 import com.backdropcam.databinding.SheetSettingsBinding
 import com.google.android.gms.auth.api.identity.AuthorizationRequest
 import com.google.android.gms.auth.api.identity.Identity
@@ -101,7 +99,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var settings: AppSettings
     private lateinit var engine: CompositeEngine
     private lateinit var backdrops: BackdropStore
-    private lateinit var scripts: ScriptStore
 
     private val io = Executors.newSingleThreadExecutor()
     private val uploadExecutor = Executors.newSingleThreadExecutor()
@@ -133,20 +130,6 @@ class MainActivity : AppCompatActivity() {
     private var lastFraming: CompositeEngine.Framing? = null
     private var backdropMean: FloatArray? = null
 
-    // Teleprompter
-    private var teleLastMs = 0L
-    private var teleAccum = 0f
-    private var refreshScriptList: (() -> Unit)? = null
-    private var teleRunning = false
-        set(value) {
-            field = value
-            main.removeCallbacks(teleTick)
-            if (value) {
-                teleLastMs = 0L
-                main.post(teleTick)
-            }
-        }
-
     // Result / Drive upload
     private var lastVideo: Uri? = null
     private var lastLink: String? = null
@@ -174,18 +157,6 @@ class MainActivity : AppCompatActivity() {
     private val pickBackdrop =
         registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri -> if (uri != null) addBackdrop(uri) }
 
-    private val importScript =
-        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-            if (uri != null) io.execute {
-                try {
-                    val (title, body) = scripts.import(uri)
-                    main.post { editScript(null, title, body) }
-                } catch (e: Exception) {
-                    main.post { hint("Could not read that file") }
-                }
-            }
-        }
-
     private val authLauncher =
         registerForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
             val outcome = runCatching {
@@ -212,7 +183,6 @@ class MainActivity : AppCompatActivity() {
         val crashedLastTime = settings.sessionOpen
         if (crashedLastTime) settings.enterSafeMode()
         backdrops = BackdropStore(this)
-        scripts = ScriptStore(this)
         micGain = settings.micGain
         lastVideo = settings.lastVideo?.let(Uri::parse)
 
@@ -236,12 +206,10 @@ class MainActivity : AppCompatActivity() {
 
         updateMicUi()
         updateTimerUi()
-        updateTeleUi()
         ui.aspectChip.text = viewModeLabel()
         buildBackdropStrip()
         applyBackdropSelection()
         lastVideo?.let { loadThumbInto(it, ui.lastThumb, forgetIfMissing = true) }
-        handleShareIntent(intent)
 
         val needed = mutableListOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
         if (Build.VERSION.SDK_INT <= 28) needed += Manifest.permission.WRITE_EXTERNAL_STORAGE
@@ -426,7 +394,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        teleRunning = false
         remote?.stop()
         if (Build.VERSION.SDK_INT >= 29) (thermalListener as? PowerManager.OnThermalStatusChangedListener)?.let { l ->
             runCatching { getSystemService(PowerManager::class.java)?.removeThermalStatusListener(l) }
@@ -434,11 +401,6 @@ class MainActivity : AppCompatActivity() {
         engine.release()
         // The executors are left running: a save or upload that is still in flight finishes on
         // its own, and its result is dropped because the activity is gone.
-    }
-
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        handleShareIntent(intent)
     }
 
     /** Volume buttons and Bluetooth selfie remotes start / stop recording. */
@@ -507,11 +469,6 @@ class MainActivity : AppCompatActivity() {
         ui.micBtn.setOnClickListener { onMicPressed() }
         ui.tuneBtn.setOnClickListener { setAdjustOpen(!adjustOpen) }
         ui.remoteBtn.setOnClickListener { showRemoteSheet() }
-        ui.teleBtn.setOnClickListener { showScriptsSheet() }
-        // Tap the script to pause / resume scrolling (also handy for rehearsing).
-        val toggleTele = View.OnClickListener { teleRunning = !teleRunning }
-        ui.teleBox.setOnClickListener(toggleTele)
-        ui.teleText.setOnClickListener(toggleTele)
         ui.recordBtn.setOnClickListener { onRecordPressed() }
         ui.pauseBtn.setOnClickListener { togglePause() }
         ui.flipBtn.setOnClickListener { flipCamera() }
@@ -566,7 +523,6 @@ class MainActivity : AppCompatActivity() {
                     deviceRotation = target
                     engine.setDeviceRotation(target)
                     rotateControls(target)
-                    updateTeleUi()
                     ui.aspectChip.text = viewModeLabel()
                 }
             }
@@ -616,7 +572,6 @@ class MainActivity : AppCompatActivity() {
             torchOn = false
             boundFourByThree = fourByThree
             setupCameraControls()
-            updateTeleUi()
         }, ContextCompat.getMainExecutor(this))
     }
 
@@ -1280,10 +1235,6 @@ class MainActivity : AppCompatActivity() {
         ui.flipBtn.visibility = View.GONE
         ui.pauseBtn.visibility = View.VISIBLE
         ui.pauseBtn.setImageResource(R.drawable.ic_pause)
-        if (ui.teleBox.visibility == View.VISIBLE) {
-            ui.teleScroll.scrollTo(0, 0)
-            teleRunning = true
-        }
         setControlsEnabled(false)
         updateMicUi()
         tickTimer()
@@ -1313,12 +1264,10 @@ class MainActivity : AppCompatActivity() {
         if (rec.paused) {
             rec.resume()
             recDotBlink?.resume()
-            if (ui.teleBox.visibility == View.VISIBLE) teleRunning = true
             ui.pauseBtn.setImageResource(R.drawable.ic_pause)
         } else {
             rec.pause()
             recDotBlink?.pause()
-            teleRunning = false
             ui.pauseBtn.setImageResource(R.drawable.ic_play_arrow)
         }
         updateRecTime(rec)
@@ -1334,7 +1283,6 @@ class MainActivity : AppCompatActivity() {
         ui.quickRow.visibility = View.VISIBLE
         ui.pauseBtn.visibility = View.GONE
         ui.flipBtn.visibility = View.VISIBLE
-        teleRunning = false
         setControlsEnabled(true)
         updateMicUi()
         engine.stopRecording {
@@ -1802,7 +1750,12 @@ class MainActivity : AppCompatActivity() {
     private fun saveWithDriveApp(uri: Uri) {
         val send = Intent(Intent.ACTION_SEND).setType("video/mp4").putExtra(Intent.EXTRA_STREAM, uri)
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        val drive = Intent(send).setPackage("com.google.android.apps.docs")
+        val drive = Intent(send).setPackage(DRIVE_PACKAGE)
+        // Drive closes its "Save" screen at once and uploads later in the background. The
+        // permission that comes with the share ends when that screen closes, so the upload could
+        // no longer read the video ("Synchronization failed"). Give Drive lasting permission to
+        // read this one video, so the background upload can finish.
+        runCatching { grantUriPermission(DRIVE_PACKAGE, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
         try {
             startActivity(drive)
             hint("In Drive, tap Save. Then open the file there, tap Share, and copy the link.")
@@ -1851,128 +1804,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun shareText(text: String) {
         startActivitySafe(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text), "Share link"))
-    }
-
-    // ================================================================== teleprompter
-
-    private val teleTick = object : Runnable {
-        override fun run() {
-            if (!teleRunning || ui.teleBox.visibility != View.VISIBLE) return
-            val now = System.currentTimeMillis()
-            val dt = if (teleLastMs == 0L) 0f else (now - teleLastMs) / 1000f
-            teleLastMs = now
-            teleAccum += settings.teleSpeed * dp(9) * dt
-            val step = teleAccum.toInt()
-            if (step > 0) {
-                ui.teleScroll.scrollBy(0, step)
-                teleAccum -= step
-            }
-            main.postDelayed(this, 16)
-        }
-    }
-
-    private fun updateTeleUi() {
-        val front = settings.frontCamera
-        ui.teleBtn.visibility = if (front) View.VISIBLE else View.GONE
-        val script = settings.teleScript?.let { scripts.load(it) }
-        // The script box is laid out for portrait; it would read sideways with the phone turned.
-        val show = front && settings.teleOn && script != null && script.body.isNotBlank() && deviceRotation % 180 == 0
-        ui.teleBox.visibility = if (show) View.VISIBLE else View.GONE
-        if (!show) teleRunning = false
-        if (script != null) ui.teleText.text = script.body
-        ui.teleText.textSize = settings.teleSize.toFloat()
-        setActive(ui.teleBtn, show)
-    }
-
-    private fun showScriptsSheet() {
-        val b = SheetScriptsBinding.inflate(layoutInflater)
-        val dlg = BottomSheetDialog(this)
-        dlg.setContentView(b.root)
-        b.teleSwitch.isChecked = settings.teleOn
-        b.teleSwitch.setOnCheckedChangeListener { _, on -> settings.teleOn = on; updateTeleUi() }
-        b.speedSlider.value = settings.teleSpeed.coerceIn(1, 10).toFloat()
-        b.speedSlider.addOnChangeListener { _, v, _ -> settings.teleSpeed = v.toInt() }
-        b.sizeSlider.value = (settings.teleSize.coerceIn(18, 48) / 2 * 2).toFloat()
-        b.sizeSlider.addOnChangeListener { _, v, _ -> settings.teleSize = v.toInt(); updateTeleUi() }
-        b.newScriptBtn.setOnClickListener { editScript(null, "", "") }
-        b.importScriptBtn.setOnClickListener {
-            if (!busy()) importScript.launch(arrayOf("text/plain", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"))
-        }
-        val refresh = {
-            b.scriptList.removeAllViews()
-            val list = scripts.list()
-            if (list.isEmpty()) {
-                b.scriptList.addView(TextView(this).apply {
-                    text = "No scripts yet. Tap New script or Import."
-                    setTextColor(ContextCompat.getColor(context, R.color.text_secondary))
-                    setPadding(0, dp(8), 0, dp(8))
-                })
-            }
-            for (sc in list) {
-                val active = sc.id == settings.teleScript
-                b.scriptList.addView(TextView(this).apply {
-                    text = (if (active) "✓  " else "") + sc.title
-                    textSize = 16f
-                    setTextColor(if (active) ContextCompat.getColor(context, R.color.accent) else 0xFFFFFFFF.toInt())
-                    setPadding(0, dp(12), 0, dp(12))
-                    setOnClickListener {
-                        settings.teleScript = sc.id
-                        settings.teleOn = true
-                        b.teleSwitch.isChecked = true
-                        updateTeleUi()
-                        refreshScriptList?.invoke()
-                    }
-                    setOnLongClickListener {
-                        MaterialAlertDialogBuilder(this@MainActivity)
-                            .setTitle(sc.title)
-                            .setItems(arrayOf("Edit", "Delete")) { _, which ->
-                                if (which == 0) editScript(sc.id, sc.title, sc.body)
-                                else {
-                                    scripts.delete(sc.id)
-                                    if (settings.teleScript == sc.id) settings.teleScript = null
-                                    updateTeleUi()
-                                    refreshScriptList?.invoke()
-                                }
-                            }
-                            .show()
-                        true
-                    }
-                })
-            }
-        }
-        refreshScriptList = refresh
-        refresh()
-        dlg.setOnDismissListener { if (refreshScriptList === refresh) refreshScriptList = null }
-        dlg.show()
-    }
-
-    /** Opens the script editor; saving makes it the active teleprompter script. */
-    private fun editScript(id: String?, title: String, body: String) {
-        val b = DialogScriptBinding.inflate(layoutInflater)
-        b.scriptTitle.setText(title)
-        b.scriptBody.setText(body)
-        MaterialAlertDialogBuilder(this)
-            .setTitle(if (id == null) "New script" else "Edit script")
-            .setView(b.root)
-            .setPositiveButton("Save") { _, _ ->
-                settings.teleScript = scripts.save(id, b.scriptTitle.text.toString(), b.scriptBody.text.toString())
-                settings.teleOn = true
-                updateTeleUi()
-                refreshScriptList?.invoke()
-                if (!settings.frontCamera) hint("Script saved. Switch to the front camera to use it.")
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    /** Text shared from Google Docs, Notes, WhatsApp… becomes a new teleprompter script. */
-    private fun handleShareIntent(intent: Intent?) {
-        if (intent?.action != Intent.ACTION_SEND) return
-        // Text from other apps: keep it to a sensible size (a script, not a whole book).
-        val text = intent.getStringExtra(Intent.EXTRA_TEXT)?.take(MAX_SCRIPT_CHARS) ?: return
-        val title = (intent.getStringExtra(Intent.EXTRA_SUBJECT) ?: "Shared script").take(120)
-        intent.action = null
-        editScript(null, title, text)
     }
 
     // ================================================================== second-screen remote
@@ -2110,7 +1941,7 @@ class MainActivity : AppCompatActivity() {
         // square, and the pill and hint are centred with room around them, so nothing clips.
         val views = mutableListOf<View>(
             ui.settingsBtn, ui.flashBtn, ui.aspectChip, ui.qualityChip, ui.timerChip,
-            ui.micBtn, ui.tuneBtn, ui.teleBtn,
+            ui.micBtn, ui.tuneBtn,
             ui.pauseBtn, ui.flipBtn, ui.lastThumb, ui.countdownText, ui.recPill, ui.hintText,
             ui.tabSize, ui.tabLight, ui.adjustValue, ui.remoteBtn,
             ui.autoMatchBtn, ui.resetAdjustBtn, ui.doneAdjustBtn
@@ -2183,8 +2014,7 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_NONE = "none"
         private const val KEY_BLUR = "blur"
         private const val KEY_ADD = "add"
-        /** Longest teleprompter script accepted from a file or another app (about 60 pages). */
-        const val MAX_SCRIPT_CHARS = 200_000
+        private const val DRIVE_PACKAGE = "com.google.android.apps.docs"
         /** ISO x seconds above which the room counts as too dark (e.g. ISO 1600 at 1/40 s). */
         private const val DARK_EXPOSURE = 40f
     }

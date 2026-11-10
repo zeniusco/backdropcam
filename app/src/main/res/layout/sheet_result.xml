@@ -100,6 +100,15 @@
         android:text="Upload to Google Drive and get link"
         app:icon="@drawable/ic_cloud_upload" />
 
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:gravity="center"
+        android:text="Or tap Share video, choose Gmail and pick Send as Drive link."
+        android:textColor="#B3FFFFFF"
+        android:textSize="12sp" />
+
     <com.google.android.material.progressindicator.LinearProgressIndicator
         android:id="@+id/uploadProgress"
         android:layout_width="match_parent"

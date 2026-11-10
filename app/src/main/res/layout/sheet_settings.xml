@@ -108,6 +108,6 @@
         <TextView
             style="@style/SheetLabel"
             android:lineSpacingMultiplier="1.25"
-            android:text="• Volume buttons or a Bluetooth selfie remote start and stop recording.\n• Share text from Docs, Notes or WhatsApp to BackdropCam to make a teleprompter script." />
+            android:text="• Volume buttons or a Bluetooth selfie remote start and stop recording." />
     </LinearLayout>
 </androidx.core.widget.NestedScrollView>
