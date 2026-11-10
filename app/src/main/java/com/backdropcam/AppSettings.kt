@@ -61,8 +61,8 @@ class AppSettings(context: Context) {
      * Google Drive app, which works on every phone with no setup.
      */
     var driveInApp: Boolean
-        get() = p.getBoolean("driveInApp", false)
-        set(v) = p.edit().putBoolean("driveInApp", v).apply()
+        get() = p.getBoolean("driveInApp2", true)
+        set(v) = p.edit().putBoolean("driveInApp2", v).apply()
 
     var autoUpload: Boolean
         get() = p.getBoolean("autoUpload", false)

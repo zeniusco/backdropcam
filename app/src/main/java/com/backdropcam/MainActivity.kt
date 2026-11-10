@@ -1465,17 +1465,9 @@ class MainActivity : AppCompatActivity() {
         b.thumb.roundCorners(dp(16))
         loadThumbInto(uri, b.thumb)
         b.playBtn.setOnClickListener { playVideo(uri) }
-        b.shareVideoBtn.setOnClickListener {
-            startActivitySafe(
-                Intent.createChooser(
-                    Intent(Intent.ACTION_SEND).setType("video/mp4").putExtra(Intent.EXTRA_STREAM, uri)
-                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
-                    "Share video"
-                )
-            )
-        }
+        b.shareVideoBtn.setOnClickListener { shareVideo(uri) }
         b.uploadBtn.setOnClickListener {
-            if (settings.driveInApp) startUpload() else saveWithDriveApp(uri)
+            if (settings.driveInApp) startUpload() else shareVideo(uri)
         }
         b.trimBtn.setOnClickListener { showTrimDialog(uri, dlg) }
         b.retakeBtn.setOnClickListener {
@@ -1688,7 +1680,7 @@ class MainActivity : AppCompatActivity() {
         val b = resultUi ?: return
         b.uploadBtn.isEnabled = !uploading
         b.uploadBtn.text = when {
-            !settings.driveInApp -> "Save to Google Drive"
+            !settings.driveInApp -> "Share video"
             uploading -> "Uploading…"
             lastLink != null -> "Uploaded to Google Drive"
             else -> "Upload to Google Drive and get link"
@@ -1739,11 +1731,24 @@ class MainActivity : AppCompatActivity() {
             uploadFinished(null, "Could not connect to Google Drive. $why")
             return
         }
-        // Not set up with Google: go straight to the Drive app (no extra question), and use it
-        // from now on. In-app upload can be switched back on in Settings once it is set up.
-        settings.driveInApp = false
+        // Google refused (the app is not registered with Google yet, or this account is not
+        // allowed): open the normal Share menu instead, so the video can still be sent (Gmail's
+        // "Send as Drive link", Drive, WhatsApp...). Next time it tries the upload again, so it
+        // starts working by itself once the registration is in place.
         uploadFinished(null, null)
-        lastVideo?.let { saveWithDriveApp(it) }
+        lastVideo?.let { shareVideo(it) }
+        hint("Could not upload from here ($why). Pick Gmail and Send as Drive link, or any other app.")
+    }
+
+    /** The normal Share menu for a video (Gmail, Drive, WhatsApp...). */
+    private fun shareVideo(uri: Uri) {
+        startActivitySafe(
+            Intent.createChooser(
+                Intent(Intent.ACTION_SEND).setType("video/mp4").putExtra(Intent.EXTRA_STREAM, uri)
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
+                "Share video"
+            )
+        )
     }
 
     /** Hands the video to the Google Drive app ("Save to Drive"); no setup needed. */
