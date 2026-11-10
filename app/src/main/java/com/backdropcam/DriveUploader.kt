@@ -27,8 +27,11 @@ class DriveUploader(private val resolver: ContentResolver, private val accessTok
         .readTimeout(10, TimeUnit.MINUTES)
         .build()
 
-    /** @return the shareable web link, e.g. https://drive.google.com/file/d/ID/view */
-    fun uploadAndShare(uri: Uri, onProgress: (Int) -> Unit): String {
+    /** [link] opens the video; [public] is false when the account does not allow public links. */
+    class Uploaded(val link: String, val public: Boolean)
+
+    /** @return the web link, e.g. https://drive.google.com/file/d/ID/view */
+    fun uploadAndShare(uri: Uri, onProgress: (Int) -> Unit): Uploaded {
         val size = resolver.openAssetFileDescriptor(uri, "r")?.use { it.length } ?: -1L
         if (size <= 0) throw IOException("Cannot read the video's size")
         val name = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
@@ -81,10 +84,10 @@ class DriveUploader(private val resolver: ContentResolver, private val accessTok
             .header("Authorization", "Bearer $accessToken")
             .post("""{"role":"reader","type":"anyone"}""".toRequestBody("application/json".toMediaType()))
             .build()
-        http.newCall(perm).execute().use { r ->
-            if (!r.isSuccessful) throw IOException("Could not create share link: ${r.code} ${r.body?.string()}")
-        }
+        // The video is already in Drive at this point. Some company and school accounts do not
+        // allow public links: that is not a failed upload (and retrying would upload it twice).
+        val public = runCatching { http.newCall(perm).execute().use { r -> r.isSuccessful } }.getOrDefault(false)
 
-        return fileJson.optString("webViewLink", "https://drive.google.com/file/d/$id/view")
+        return Uploaded(fileJson.optString("webViewLink", "https://drive.google.com/file/d/$id/view"), public)
     }
 }

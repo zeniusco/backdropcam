@@ -204,7 +204,14 @@ class CompositeEngine(context: Context) {
     fun setPreviewSurface(surface: Surface, w: Int, h: Int) {
         handler.post {
             destroyPreview()
-            previewSurface = EGL14.eglCreateWindowSurface(display, config, surface, intArrayOf(EGL14.EGL_NONE), 0)
+            // The screen may already be gone again (the app was left at that very moment).
+            previewSurface = try {
+                if (surface.isValid) EGL14.eglCreateWindowSurface(display, config, surface, intArrayOf(EGL14.EGL_NONE), 0)
+                else EGL14.EGL_NO_SURFACE
+            } catch (e: Exception) {
+                EGL14.EGL_NO_SURFACE
+            }
+            if (previewSurface == EGL14.EGL_NO_SURFACE) return@post
             previewW = w; previewH = h
             // Frames can come in short bursts (when a mask arrives); never wait for the display.
             EGL14.eglMakeCurrent(display, previewSurface, previewSurface, eglContext)
@@ -213,8 +220,15 @@ class CompositeEngine(context: Context) {
         }
     }
 
+    /**
+     * Stops drawing to the screen. Waits (briefly) until the drawing thread has really let go
+     * of it, because Android takes the screen surface away as soon as this returns; drawing to
+     * it after that can crash the app.
+     */
     fun clearPreviewSurface() {
-        handler.post { destroyPreview() }
+        val done = java.util.concurrent.CountDownLatch(1)
+        if (!handler.post { try { destroyPreview() } finally { done.countDown() } }) return
+        runCatching { done.await(800, java.util.concurrent.TimeUnit.MILLISECONDS) }
     }
 
     fun surfaceProvider(front: Boolean, sensorRotationDegrees: Int) = Preview.SurfaceProvider { request ->
@@ -380,7 +394,12 @@ class CompositeEngine(context: Context) {
                 invalidateMask()
             }
             rotationLocked = true
-            encoderSurface = EGL14.eglCreateWindowSurface(display, config, surface, intArrayOf(EGL14.EGL_NONE), 0)
+            encoderSurface = try {
+                EGL14.eglCreateWindowSurface(display, config, surface, intArrayOf(EGL14.EGL_NONE), 0)
+            } catch (e: Exception) {
+                Log.e(TAG, "encoder surface failed", e)
+                EGL14.EGL_NO_SURFACE
+            }
             encoderW = w; encoderH = h
             recordPts = ptsNs
             recordPaused = paused
@@ -837,7 +856,11 @@ class CompositeEngine(context: Context) {
 
     /** Start measuring speed afresh (after the settings changed). */
     fun resetSpeedCheck() {
-        segExecutor.execute { segSamples = 0; segTimeAvg = 0f; slowReported = false }
+        try {
+            segExecutor.execute { segSamples = 0; segTimeAvg = 0f; slowReported = false }
+        } catch (e: RejectedExecutionException) {
+            return // the engine was released meanwhile
+        }
         handler.post { glBusyMs = 0; glWindowStart = 0; glSlowWindows = 0 }
     }
 
@@ -1535,7 +1558,9 @@ void main() {
     float inside = smoothstep(0.0, uFeather.x, p.x) * smoothstep(0.0, uFeather.x, 1.0 - p.x)
                  * smoothstep(0.0, uFeather.x, 1.0 - p.y) * smoothstep(0.0, uFeather.y, p.y);
 
-    float m = 1.0;
+    // Until the cut-out is ready (the first moment after the app or the camera starts), show
+    // only the backdrop or the blur: never the real room.
+    float m = 0.0;
     float wrap = 0.0;
     if (uHasMask > 0.5) {
         if (uAlphaReady > 0.5) {

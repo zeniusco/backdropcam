@@ -75,7 +75,7 @@ class RemoteServer(
         running = true
         Thread({
             while (running) {
-                val client = try { s.accept() } catch (e: SocketException) { break }
+                val client = try { s.accept() } catch (e: Exception) { if (!running || e is SocketException) break else continue }
                 // Only devices on the same local network (or this phone) may connect, and only a
                 // few at a time, so the phone cannot be flooded.
                 val addr = client.inetAddress

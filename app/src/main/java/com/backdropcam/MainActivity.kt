@@ -372,6 +372,9 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         settings.sessionOpen = true
         foreground = true
+        resumedAtMs = System.currentTimeMillis()
+        // Camera access may have been allowed in the phone's Settings while the app was away.
+        if (!cameraStarted && granted(Manifest.permission.CAMERA)) bindCamera()
         if (playbackPauses == 0) engine.setBackdropVideoPlaying(true)
         if (orientationListener.canDetectOrientation()) orientationListener.enable()
         (getSystemService(SENSOR_SERVICE) as? SensorManager)?.let { sm ->
@@ -383,6 +386,8 @@ class MainActivity : AppCompatActivity() {
         super.onPause()
         settings.sessionOpen = false
         foreground = false
+        // A session that ran for a while without trouble counts towards leaving safe mode.
+        if (System.currentTimeMillis() - resumedAtMs > 30_000) settings.noteCleanSession()
         engine.setBackdropVideoPlaying(false)
         orientationListener.disable()
         (getSystemService(SENSOR_SERVICE) as? SensorManager)?.unregisterListener(tiltListener)
@@ -531,7 +536,11 @@ class MainActivity : AppCompatActivity() {
 
     // ================================================================== camera
 
+    private var cameraStarted = false
+    private var resumedAtMs = 0L
+
     private fun bindCamera() {
+        cameraStarted = true
         val future = ProcessCameraProvider.getInstance(this)
         future.addListener({
             val provider = future.get()
@@ -735,7 +744,8 @@ class MainActivity : AppCompatActivity() {
         settings.quality = when (settings.quality) {
             "max" -> "1080"
             "1080" -> "720"
-            else -> "max"
+            // Low-memory phones cannot run 4K (it crashed them), so they step between 1080p and 720p.
+            else -> if (settings.memoryTier == 0) "1080" else "max"
         }
         hint(
             when (settings.quality) {
@@ -1249,6 +1259,20 @@ class MainActivity : AppCompatActivity() {
             stopRecording()
             return
         }
+        // Stop by itself, and say why, as soon as the video can no longer be written. Otherwise
+        // the timer would keep running while nothing is being saved.
+        val early = when {
+            rec.problem != null -> rec.problem
+            // Checked every few seconds: stop while there is still room to finish the file.
+            ++spaceCheckTicks % 12 == 0 && freeSpaceMb() in 0..79 -> "The phone's storage is full"
+            // Android 10 and older cannot write video files larger than about 4 GB.
+            Build.VERSION.SDK_INT < 30 && rec.bytesWritten > 3_800_000_000L -> "This Android version's largest video size (4 GB) was reached"
+            else -> null
+        }
+        if (early != null) {
+            stopRecording(early)
+            return
+        }
         main.postDelayed({ tickTimer() }, 250)
     }
 
@@ -1274,7 +1298,10 @@ class MainActivity : AppCompatActivity() {
         updateRecTime(rec)
     }
 
-    private fun stopRecording() {
+    private var spaceCheckTicks = 0
+
+    /** [stoppedEarly]: why the app stopped the recording by itself, if it did. */
+    private fun stopRecording(stoppedEarly: String? = null) {
         val rec = recorder ?: return
         recorder = null
         setShutter(false)
@@ -1290,7 +1317,7 @@ class MainActivity : AppCompatActivity() {
             io.execute {
                 try {
                     val uri = rec.finish()
-                    main.post { onVideoSaved(uri, rec) }
+                    main.post { onVideoSaved(uri, rec, stoppedEarly ?: rec.problem) }
                 } catch (e: Exception) {
                     main.post {
                         hint("Could not save the video: ${e.message}")
@@ -1300,7 +1327,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun onVideoSaved(uri: Uri, rec: VideoRecorder) {
+    private fun onVideoSaved(uri: Uri, rec: VideoRecorder, stoppedEarly: String? = null) {
         lastVideo = uri
         lastLink = null
         uploadMessage = null
@@ -1308,7 +1335,12 @@ class MainActivity : AppCompatActivity() {
         settings.lastVideo = uri.toString()
         loadThumbInto(uri, ui.lastThumb)
         if (isFinishing || isDestroyed) return
-        showResultSheet(uri, "${rec.width} × ${rec.height} · Movies/BackdropKit")
+        showResultSheet(
+            uri,
+            if (stoppedEarly != null) "Stopped early: $stoppedEarly. The video up to that point was saved."
+            else "${rec.width} × ${rec.height} · Movies/BackdropKit"
+        )
+        if (stoppedEarly != null) hint("Recording stopped: $stoppedEarly")
         if (settings.autoUpload && settings.driveInApp) startUpload()
     }
 
@@ -1474,10 +1506,17 @@ class MainActivity : AppCompatActivity() {
         }
         b.trimBtn.setOnClickListener { showTrimDialog(uri, dlg) }
         b.retakeBtn.setOnClickListener {
-            dlg.dismiss()
-            deleteVideo(uri)
-            hint("Deleted. Recording again")
-            onRecordPressed()
+            MaterialAlertDialogBuilder(this)
+                .setTitle("Delete this video and record again?")
+                .setMessage("The video will be removed from your gallery.")
+                .setPositiveButton("Delete and retake") { _, _ ->
+                    dlg.dismiss()
+                    deleteVideo(uri)
+                    hint("Deleted. Recording again")
+                    onRecordPressed()
+                }
+                .setNegativeButton("Keep it", null)
+                .show()
         }
         b.copyLinkBtn.setOnClickListener { lastLink?.let { copyLink(it) } }
         b.shareLinkBtn.setOnClickListener { lastLink?.let { shareText(it) } }
@@ -1690,7 +1729,7 @@ class MainActivity : AppCompatActivity() {
         }
         b.uploadProgress.visibility = if (uploading) View.VISIBLE else View.GONE
         b.uploadProgress.setProgressCompat(uploadProgress, true)
-        val msg = lastLink ?: uploadMessage
+        val msg = listOfNotNull(lastLink, uploadMessage).joinToString("\n\n").ifEmpty { null }
         b.uploadStatus.visibility = if (msg != null) View.VISIBLE else View.GONE
         b.uploadStatus.text = msg
         b.linkRow.visibility = if (lastLink != null) View.VISIBLE else View.GONE
@@ -1778,13 +1817,19 @@ class MainActivity : AppCompatActivity() {
         refreshResultUi()
         uploadExecutor.execute {
             try {
-                val link = DriveUploader(contentResolver, token).uploadAndShare(uri) { pct ->
+                val up = DriveUploader(contentResolver, token).uploadAndShare(uri) { pct ->
                     main.post {
                         uploadProgress = pct
                         refreshResultUi()
                     }
                 }
-                main.post { uploadFinished(link, null) }
+                main.post {
+                    uploadFinished(
+                        up.link,
+                        if (up.public) null
+                        else "Uploaded. Your Google account does not allow public links, so share the video from Google Drive with the people who should see it."
+                    )
+                }
             } catch (e: Exception) {
                 main.post { uploadFinished(null, "Upload failed: ${e.message}") }
             }
@@ -1797,7 +1842,7 @@ class MainActivity : AppCompatActivity() {
         if (link != null) {
             lastLink = link
             copyLink(link)
-            if (resultUi == null) hint("Uploaded to Google Drive. Link copied.")
+            if (resultUi == null) hint(message ?: "Uploaded to Google Drive. Link copied.")
         } else if (message != null && resultUi == null) {
             hint(message)
         }

@@ -60,18 +60,26 @@ object Trimmer {
             pending = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values) ?: error("Cannot create gallery entry")
             resolver.openFileDescriptor(pending, "rw") ?: error("Cannot open gallery entry")
         } else null
-        val muxer = if (pfd != null) {
-            MediaMuxer(pfd.fileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
-        } else {
-            @Suppress("DEPRECATION")
-            val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES), "BackdropKit")
-            dir.mkdirs()
-            file = File(dir, name)
-            MediaMuxer(file.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+        val muxer = try {
+            if (pfd != null) {
+                MediaMuxer(pfd.fileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            } else {
+                @Suppress("DEPRECATION")
+                val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES), "BackdropKit")
+                dir.mkdirs()
+                file = File(dir, name)
+                MediaMuxer(file.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            }
+        } catch (t: Throwable) {
+            runCatching { pfd?.close() }
+            pending?.let { runCatching { resolver.delete(it, null, null) } }
+            throw t
         }
 
         val ex = MediaExtractor()
         var ok = false
+        // Any failure ends up below, where the unfinished copy is removed (nothing hidden is left).
+        var problem: Throwable? = null
         try {
             ex.setDataSource(context, src, null)
             val map = IntArray(ex.trackCount) { -1 }
@@ -110,16 +118,19 @@ object Trimmer {
             }
             muxer.stop()
             ok = samples > 0
+        } catch (t: Throwable) {
+            problem = t
         } finally {
-            ex.release()
+            runCatching { ex.release() }
             runCatching { muxer.release() }
-            pfd?.close()
+            runCatching { pfd?.close() }
         }
+        val why = problem?.let { it.message ?: it.javaClass.simpleName } ?: "Nothing left after trimming"
 
         if (pending != null) {
             if (!ok) {
-                resolver.delete(pending, null, null)
-                error("Nothing left after trimming")
+                runCatching { resolver.delete(pending, null, null) }
+                error(why)
             }
             resolver.update(pending, ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }, null, null)
             return pending
@@ -127,7 +138,7 @@ object Trimmer {
         val f = file!!
         if (!ok) {
             f.delete()
-            error("Nothing left after trimming")
+            error(why)
         }
         val latch = CountDownLatch(1)
         var scanned: Uri? = null

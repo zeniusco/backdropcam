@@ -53,7 +53,8 @@ class VideoRecorder(
     personName: String = "",
 ) {
     /** "video/hevc" or "video/avc", whichever is used for this recording. */
-    val videoMime: String = if (preferHevc && hevcSupports(width, height)) MediaFormat.MIMETYPE_VIDEO_HEVC else MediaFormat.MIMETYPE_VIDEO_AVC
+    var videoMime: String = if (preferHevc && hevcSupports(width, height)) MediaFormat.MIMETYPE_VIDEO_HEVC else MediaFormat.MIMETYPE_VIDEO_AVC
+        private set
     @Volatile var paused = false
         private set
     @Volatile private var pausedAtNs = 0L
@@ -137,7 +138,14 @@ class VideoRecorder(
         try {
             val audioOk = withAudio && setupAudio()
             sink = MuxSink(muxer, if (audioOk) 2 else 1)
-            videoCodec = createVideoEncoder()
+            videoCodec = try {
+                createVideoEncoder()
+            } catch (e: Exception) {
+                // Some phones list an H.265 encoder that then refuses to start: use H.264 instead.
+                if (videoMime != MediaFormat.MIMETYPE_VIDEO_HEVC) throw e
+                videoMime = MediaFormat.MIMETYPE_VIDEO_AVC
+                createVideoEncoder()
+            }
             inputSurface = videoCodec.createInputSurface()
         } catch (t: Throwable) {
             // Leave nothing behind: an empty, invisible "pending" video in the gallery.
@@ -171,13 +179,18 @@ class VideoRecorder(
         val hwName = if (videoMime == MediaFormat.MIMETYPE_VIDEO_HEVC) hevcEncoder?.name else null
         val codec = if (hwName != null) MediaCodec.createByCodecName(hwName) else MediaCodec.createEncoderByType(videoMime)
         try {
-            codec.configure(vf, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            try {
+                codec.configure(vf, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            } catch (e: Exception) {
+                // Some (older) encoders reject High profile: retry with their defaults.
+                vf.removeKey(MediaFormat.KEY_PROFILE)
+                vf.removeKey(MediaFormat.KEY_LEVEL)
+                codec.reset()
+                codec.configure(vf, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            }
         } catch (e: Exception) {
-            // Some (older) encoders reject High profile: retry with their defaults.
-            vf.removeKey(MediaFormat.KEY_PROFILE)
-            vf.removeKey(MediaFormat.KEY_LEVEL)
-            codec.reset()
-            codec.configure(vf, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            runCatching { codec.release() }
+            throw e
         }
         return codec
     }
@@ -191,24 +204,27 @@ class VideoRecorder(
     /** Call after the GL engine detached the encoder surface. Returns the gallery URI. */
 
     fun finish(): Uri {
-        videoCodec.signalEndOfInputStream()
+        // Every step is guarded: whatever goes wrong, the encoders and the microphone are let go
+        // and no hidden, half-written file is left in the gallery.
+        runCatching { videoCodec.signalEndOfInputStream() }
         audioRunning = false
-        videoThread?.join(5000)
-        audioThread?.join(5000)
+        runCatching { videoThread?.join(5000) }
+        runCatching { audioThread?.join(5000) }
         runCatching { videoCodec.stop() }
-        videoCodec.release()
-        audioCodec?.run { runCatching { stop() }; release() }
-        audioRecord?.run { runCatching { stop() }; release() }
-        isolation?.close()
+        runCatching { videoCodec.release() }
+        audioCodec?.run { runCatching { stop() }; runCatching { release() } }
+        audioRecord?.run { runCatching { stop() }; runCatching { release() } }
+        // Only once the sound thread has really ended (it is the one using it).
+        if (audioThread?.isAlive != true) isolation?.close()
         runCatching { inputSurface.release() }
-        val ok = sink.stop()
+        val ok = runCatching { sink.stop() }.getOrDefault(false)
         val why = failure ?: "Recording was too short"
 
         if (Build.VERSION.SDK_INT >= 29) {
-            pfd?.close()
+            runCatching { pfd?.close() }
             val uri = pendingUri!!
             if (!ok) {
-                resolver.delete(uri, null, null)
+                runCatching { resolver.delete(uri, null, null) }
                 error(why)
             }
             resolver.update(uri, ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }, null, null)
@@ -278,6 +294,7 @@ class VideoRecorder(
             var inputDone = false
             var outputDone = false
             var readErrors = 0
+            try {
             while (!outputDone) {
                 if (!inputDone && paused && audioRunning) {
                     rec.read(pcm, 0, pcm.size) // keep draining the mic, but drop the audio
@@ -296,7 +313,16 @@ class VideoRecorder(
                                     audioSamples = 0
                                     audioResync = false
                                 }
-                                val ptsUs = audioBaseUs + audioSamples * 1_000_000L / SAMPLE_RATE
+                                var ptsUs = audioBaseUs + audioSamples * 1_000_000L / SAMPLE_RATE
+                                // If the phone was too busy and microphone samples were lost, the
+                                // sound would run ahead of the picture from then on. Line it up
+                                // with the clock again once it is clearly off.
+                                val expectedUs = nowUs - n * 1_000_000L / SAMPLE_RATE
+                                if (expectedUs - ptsUs > 250_000L) {
+                                    audioBaseUs = expectedUs
+                                    audioSamples = 0
+                                    ptsUs = expectedUs
+                                }
                                 audioSamples += n
                                 // Clean the noise first, so the volume boost does not raise it too.
                                 isolation?.process(pcm, n)
@@ -312,6 +338,7 @@ class VideoRecorder(
                                 // The microphone gave nothing (another app may hold it). Keep the
                                 // video going; after a while give up on sound for this recording.
                                 codec.queueInputBuffer(idx, 0, 0, nowUs, 0)
+                                audioResync = true
                                 if (++readErrors > 200) {
                                     audioRunning = false
                                 } else {
@@ -325,6 +352,12 @@ class VideoRecorder(
                     }
                 }
                 outputDone = pump(codec, info, AUDIO, 0)
+            }
+            } catch (t: Throwable) {
+                // The sound encoder or the microphone failed (e.g. a phone call took it). The
+                // video carries on without sound from here; the app must never crash for this.
+                android.util.Log.w("VideoRecorder", "sound stopped", t)
+                audioRunning = false
             }
         }, "audio-drain").also { it.start() }
     }
@@ -343,6 +376,13 @@ class VideoRecorder(
     /** Why the recording failed (e.g. the storage filled up), or null. */
     @Volatile private var failure: String? = null
 
+    /** Why writing the video stopped early (null while all is well). Safe from any thread. */
+    val problem: String? get() = failure
+
+    /** Bytes written to the file so far. */
+    @Volatile var bytesWritten = 0L
+        private set
+
     /** Handles one output buffer. Returns true at end of stream (or once this track has failed). */
     private fun pump(codec: MediaCodec, info: MediaCodec.BufferInfo, slot: Int, timeoutUs: Long): Boolean {
         try {
@@ -359,6 +399,7 @@ class VideoRecorder(
                         buf.position(info.offset)
                         buf.limit(info.offset + info.size)
                         sink.write(trackIndex[slot], buf, info)
+                        bytesWritten += info.size
                     }
                     codec.releaseOutputBuffer(idx, false)
                     if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) return true

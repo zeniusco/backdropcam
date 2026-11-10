@@ -21,6 +21,12 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.BackdropCam">
 
+        <!-- The camera screen is built for an upright phone. Android 16 otherwise ignores the
+             portrait setting on tablets and foldables, which would turn the picture sideways. -->
+        <property
+            android:name="android.window.PROPERTY_COMPAT_ALLOW_RESTRICTED_RESIZABILITY"
+            android:value="true" />
+
 
         <activity
             android:name=".MainActivity"

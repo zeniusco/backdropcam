@@ -124,8 +124,23 @@ class AppSettings(context: Context) {
         get() = p.getBoolean("safeMode", false)
         set(v) = p.edit().putBoolean("safeMode", v).apply()
 
+    /**
+     * Called when the camera screen closes normally after being used for a while. Safe mode is
+     * a precaution, not a life sentence: after three trouble-free sessions the normal (faster,
+     * sharper) cut-out comes back. Only if the app then crashes again does safe mode stay.
+     */
+    fun noteCleanSession() {
+        if (!safeMode) return
+        val runs = p.getInt("safeCleanRuns", 0) + 1
+        val e = p.edit().putInt("safeCleanRuns", runs)
+        if (runs >= 3 && p.getInt("safeModeEntries", 0) < 2) e.putBoolean("safeMode", false)
+        e.apply()
+    }
+
     fun enterSafeMode() {
         p.edit()
+            .putInt("safeModeEntries", p.getInt("safeModeEntries", 0) + 1)
+            .putInt("safeCleanRuns", 0)
             .putBoolean("safeMode", true)
             .putString("quality2", "720")
             .putBoolean("hq2", false)
@@ -186,7 +201,8 @@ class AppSettings(context: Context) {
         get() = when (quality) {
             "1080" -> 1920
             "720" -> 1280
-            else -> 3840
+            // 4K needs far more memory than low-memory phones have (it made them crash).
+            else -> if (memoryTier == 0) 1920 else 3840
         }
 }
 
