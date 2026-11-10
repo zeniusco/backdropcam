@@ -12,5 +12,5 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-rootProject.name = "BackdropCam"
+rootProject.name = "BackdropKit"
 include(":app")

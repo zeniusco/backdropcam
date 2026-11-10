@@ -15,8 +15,23 @@ jobs:
           java-version: 17
       - uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: 8.9
+          gradle-version: 8.13
       - run: gradle :app:assembleDebug --stacktrace
+      # Google Play bundle (.aab), signed with the upload key from the repository's secrets.
+      # Skipped (not failed) until the secrets UPLOAD_KEYSTORE_BASE64, UPLOAD_STORE_PASSWORD,
+      # UPLOAD_KEY_ALIAS and UPLOAD_KEY_PASSWORD are added.
+      - name: Play Store bundle (.aab)
+        env:
+          UPLOAD_KEYSTORE_BASE64: ${{ secrets.UPLOAD_KEYSTORE_BASE64 }}
+          UPLOAD_STORE_PASSWORD: ${{ secrets.UPLOAD_STORE_PASSWORD }}
+          UPLOAD_KEY_ALIAS: ${{ secrets.UPLOAD_KEY_ALIAS }}
+          UPLOAD_KEY_PASSWORD: ${{ secrets.UPLOAD_KEY_PASSWORD }}
+        run: |
+          if [ -z "$UPLOAD_KEYSTORE_BASE64" ]; then echo "No upload key yet: skipping the Play bundle"; exit 0; fi
+          echo "$UPLOAD_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/upload.jks"
+          UPLOAD_KEYSTORE_FILE="$RUNNER_TEMP/upload.jks" gradle :app:bundleRelease --stacktrace
+          cp app/build/outputs/bundle/release/app-release.aab BackdropKit.aab
+          rm -f "$RUNNER_TEMP/upload.jks"
       - uses: actions/upload-artifact@v4
         with:
           name: BackdropKit.apk
@@ -34,7 +49,8 @@ jobs:
           # GitHub's release API sometimes returns a temporary 500; retry a few times.
           for attempt in 1 2 3 4; do
             gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
-            if gh release create "$TAG" BackdropKit.apk \
+            FILES="BackdropKit.apk"; [ -f BackdropKit.aab ] && FILES="$FILES BackdropKit.aab"
+            if gh release create "$TAG" $FILES \
                 --target "${{ github.sha }}" \
                 --prerelease \
                 --title "BackdropKit $VERSION (${{ github.ref_name }})" \

@@ -5,12 +5,13 @@ plugins {
 
 android {
     namespace = "com.backdropcam"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.backdropkit"
         minSdk = 26
-        targetSdk = 35
+        // Google Play requires new apps to target the latest Android (16).
+        targetSdk = 36
         // Version follows the build number: build 52 is version 1.0.52 (release v1.0.52).
         val buildNumber = (System.getenv("GITHUB_RUN_NUMBER") ?: "47").toInt()
         versionCode = buildNumber
@@ -26,23 +27,34 @@ android {
             keyAlias = "androiddebugkey"
             keyPassword = "android"
         }
+        // Upload key for Google Play. It is never stored in the code: the build server receives
+        // it from the repository's secrets (see .github/workflows/build.yml).
+        val keystore = System.getenv("UPLOAD_KEYSTORE_FILE")
+        if (!keystore.isNullOrBlank()) create("upload") {
+            storeFile = file(keystore)
+            storePassword = System.getenv("UPLOAD_STORE_PASSWORD")
+            keyAlias = System.getenv("UPLOAD_KEY_ALIAS")
+            keyPassword = System.getenv("UPLOAD_KEY_PASSWORD")
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.findByName("upload")
         }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions { jvmTarget = "17" }
     buildFeatures { viewBinding = true }
     // Voice isolation (RNNoise, in C)
     externalNativeBuild { cmake { path = file("src/main/cpp/CMakeLists.txt") } }
     androidResources { noCompress += listOf("tflite") }
 }
+
+kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) } }
 
 dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
@@ -57,7 +69,7 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:$camerax")
 
     // On-device person segmentation
-    implementation("com.google.mediapipe:tasks-vision:0.10.21")
+    implementation("com.google.mediapipe:tasks-vision:0.10.35")
 
     // Google Drive upload (OAuth token via Identity Authorization API, upload via REST)
     implementation("com.google.android.gms:play-services-auth:21.3.0")

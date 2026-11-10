@@ -14,3 +14,5 @@ add_library(voiceiso SHARED
 target_include_directories(voiceiso PRIVATE rnnoise)
 target_compile_options(voiceiso PRIVATE -O3 -w)
 target_link_libraries(voiceiso m)
+# Google Play requires native code to work on phones with 16 KB memory pages.
+target_link_options(voiceiso PRIVATE "-Wl,-z,max-page-size=16384")
