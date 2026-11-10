@@ -49,6 +49,8 @@ class VideoRecorder(
     preferHevc: Boolean = true,
     /** Remove background noise from the sound, keeping the voice. */
     voiceIsolation: Boolean = true,
+    /** The person's name for the file name (Name_BackdropKit_date_time.mp4); blank = none. */
+    personName: String = "",
 ) {
     /** "video/hevc" or "video/avc", whichever is used for this recording. */
     val videoMime: String = if (preferHevc && hevcSupports(width, height)) MediaFormat.MIMETYPE_VIDEO_HEVC else MediaFormat.MIMETYPE_VIDEO_AVC
@@ -87,7 +89,8 @@ class VideoRecorder(
     private val appContext = context.applicationContext
     private val resolver = appContext.contentResolver
     val startNs = System.nanoTime()
-    val displayName = "BackdropKit_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".mp4"
+    val displayName = fileNamePart(personName).let { if (it.isEmpty()) "" else it + "_" } +
+        "BackdropKit_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".mp4"
 
     private val isolation: VoiceIsolation? =
         if (voiceIsolation && withAudio) VoiceIsolation().takeIf { it.available } else null
@@ -431,6 +434,14 @@ class VideoRecorder(
         private const val VIDEO = 0
         private const val AUDIO = 1
         const val SAMPLE_RATE = 48000
+
+        /**
+         * A name made safe for a file name: letters (any language), digits, '-' and '_' kept,
+         * spaces become '_', everything else dropped, at most 40 characters.
+         */
+        fun fileNamePart(name: String): String =
+            name.trim().replace(Regex("\\s+"), "_").replace(Regex("[^\\p{L}\\p{N}_-]"), "")
+                .take(40).trim('_', '-')
 
         /** The H.264 encoder's limits, looked up once (enumerating codecs is slow). */
         private val avcCapsCache: MediaCodecInfo.VideoCapabilities? by lazy {

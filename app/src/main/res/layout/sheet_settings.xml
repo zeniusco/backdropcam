@@ -18,6 +18,22 @@
         <!-- Recording -->
         <TextView style="@style/SheetSection" android:text="Recording" />
 
+        <com.google.android.material.textfield.TextInputLayout
+            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:hint="Your name (optional, added to video file names)">
+
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/personName"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="textPersonName|textCapWords"
+                android:maxLength="40"
+                android:maxLines="1" />
+        </com.google.android.material.textfield.TextInputLayout>
+
         <TextView style="@style/SheetLabel" android:text="Stop automatically after" />
 
         <com.google.android.material.chip.ChipGroup

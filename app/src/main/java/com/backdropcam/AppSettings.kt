@@ -64,6 +64,11 @@ class AppSettings(context: Context) {
         get() = p.getBoolean("driveInApp2", true)
         set(v) = p.edit().putBoolean("driveInApp2", v).apply()
 
+    /** Name put at the start of video file names (Name_BackdropKit_date_time.mp4). */
+    var personName: String
+        get() = p.getString("personName", "")!!
+        set(v) = p.edit().putString("personName", v).apply()
+
     var autoUpload: Boolean
         get() = p.getBoolean("autoUpload", false)
         set(v) = p.edit().putBoolean("autoUpload", v).apply()

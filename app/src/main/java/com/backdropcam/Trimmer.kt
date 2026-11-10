@@ -39,7 +39,15 @@ object Trimmer {
     /** Writes [startUs]..[endUs] of [src] as a new gallery video and returns its URI. */
     fun trim(context: Context, src: Uri, startUs: Long, endUs: Long): Uri {
         val resolver = context.contentResolver
-        val name = "BackdropKit_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + "_trim.mp4"
+        // Same name as the original with "_trim" added (keeps the person's name in it).
+        val original = runCatching {
+            resolver.query(src, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                if (c.moveToFirst()) c.getString(0) else null
+            }
+        }.getOrNull()
+        val base = original?.substringBeforeLast('.')?.takeIf { it.isNotBlank() }
+            ?: ("BackdropKit_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()))
+        val name = "${base}_trim.mp4"
         var pending: Uri? = null
         var file: File? = null
         val pfd = if (Build.VERSION.SDK_INT >= 29) {

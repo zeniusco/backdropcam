@@ -1212,6 +1212,7 @@ class MainActivity : AppCompatActivity() {
                 // In hands-free mode the recording's own sound is checked for "stop".
                 preferHevc = settings.smallFiles,
                 voiceIsolation = settings.voiceIsolation,
+                personName = settings.personName,
             )
             rec.start()
             engine.startRecording(rec.inputSurface, size.width, size.height, rotation, { rec.ptsNs() }, { rec.paused })
@@ -1418,6 +1419,8 @@ class MainActivity : AppCompatActivity() {
             settings.autoStop = stopIds.entries.firstOrNull { it.value == ids.firstOrNull() }?.key ?: 0
         }
 
+        b.personName.setText(settings.personName)
+        b.personName.doAfterTextChanged { settings.personName = it.toString().trim() }
         b.smallFilesSwitch.isChecked = settings.smallFiles
         b.smallFilesSwitch.setOnCheckedChangeListener { _, on -> settings.smallFiles = on }
         b.mirrorSwitch.isChecked = settings.mirrorFront
