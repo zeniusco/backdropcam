@@ -10,6 +10,21 @@ class AppSettings(context: Context) {
      * Older or low-memory phones: start at 1080p with the fast cut-out model, which they can run
      * smoothly. The user can still pick higher settings themselves.
      */
+    /**
+     * How much memory the phone has: 0 = low (under about 4.5 GB, or Android's "low RAM" flag),
+     * 1 = mid (under about 7 GB), 2 = high. The screen preview is lightened on low and mid phones.
+     */
+    val memoryTier: Int = run {
+        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+        val mem = android.app.ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }
+        val gb = mem.totalMem / (1024.0 * 1024 * 1024)
+        when {
+            am.isLowRamDevice || gb < 4.5 -> 0
+            gb < 7.0 -> 1
+            else -> 2
+        }
+    }
+
     val lowEndPhone: Boolean = run {
         val am = context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
         val mem = android.app.ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }
@@ -57,9 +72,9 @@ class AppSettings(context: Context) {
         get() = p.getBoolean("micOn", true)
         set(v) = p.edit().putBoolean("micOn", v).apply()
 
-    /** Remove background noise (fans, traffic, hum) from recordings, keeping the voice. On by default. */
+    /** Remove background noise (fans, traffic, hum) from recordings, keeping the voice. Off by default. */
     var voiceIsolation: Boolean
-        get() = p.getBoolean("voiceIsolation", true)
+        get() = p.getBoolean("voiceIsolation", false)
         set(v) = p.edit().putBoolean("voiceIsolation", v).apply()
 
     /** 1.0 = 100 % */

@@ -928,13 +928,23 @@ class CompositeEngine(context: Context) {
         }
     }
 
+    /** While recording, draw only every n-th frame on the screen (1 = all). The video gets all. */
+    @Volatile var previewEveryNthWhileRecording = 1
+    private var previewCounter = 0L
+
     private fun present(slot: Slot) {
         countPresented()
         slot.pending = false
         makeCurrentAny()
         computeAlpha(slot)
         maybeSnapshot(slot)
-        showOnScreen(slot)
+        val recording = encoderSurface != EGL14.EGL_NO_SURFACE
+        val n = previewEveryNthWhileRecording
+        if (!recording || n <= 1 || ++previewCounter % n == 0L) {
+            showOnScreen(slot)
+        } else if (mode == MODE_BLUR || (mode == MODE_IMAGE && !bgReady)) {
+            updateBlurSource(slot) // the video's blurred background still needs this frame
+        }
         if (slot.encode && encoderSurface != EGL14.EGL_NO_SURFACE) {
             EGL14.eglMakeCurrent(display, encoderSurface, encoderSurface, eglContext)
             val (cx, cy) = cropW()

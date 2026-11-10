@@ -470,6 +470,23 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupPreviewSurface() {
+        // Lighter screen preview on phones with less memory: the preview is drawn at a lower
+        // resolution and the phone's display hardware scales it up for free. The recording is
+        // not affected (it is drawn separately, at full quality).
+        val previewLongSide = when (settings.memoryTier) { 0 -> 960; 1 -> 1280; else -> 0 }
+        if (previewLongSide > 0) {
+            ui.surface.addOnLayoutChangeListener { v, l, t, r, b, ol, ot, or, ob ->
+                val w = r - l
+                val h = b - t
+                if (w <= 0 || h <= 0 || (w == or - ol && h == ob - ot)) return@addOnLayoutChangeListener
+                val s = previewLongSide.toFloat() / max(w, h)
+                if (s < 1f) ui.surface.holder.setFixedSize((w * s).roundToInt() and 1.inv(), (h * s).roundToInt() and 1.inv())
+                else ui.surface.holder.setSizeFromLayout()
+            }
+        }
+        // While recording on a low-memory phone, the screen shows every second frame so the
+        // phone keeps up; the video itself still gets every frame.
+        engine.previewEveryNthWhileRecording = if (settings.memoryTier == 0) 2 else 1
         ui.surface.holder.addCallback(object : SurfaceHolder.Callback {
             override fun surfaceCreated(holder: SurfaceHolder) {}
             override fun surfaceChanged(holder: SurfaceHolder, format: Int, w: Int, h: Int) {
