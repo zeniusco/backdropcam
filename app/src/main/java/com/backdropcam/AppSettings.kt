@@ -138,6 +138,25 @@ class AppSettings(context: Context) {
         e.apply()
     }
 
+    /** After the phone ran out of memory or the app froze: the lightest picture settings. */
+    fun enterLightSettings() {
+        p.edit()
+            .putString("quality2", "720")
+            .putBoolean("hq2", false)
+            .putBoolean("sessionOpen", false)
+            .commit()
+    }
+
+    /** What the app was doing a few seconds ago (kept for the error report). */
+    var lastState: String
+        get() = p.getString("lastState", "")!!
+        set(v) = p.edit().putString("lastState", v).apply()
+
+    /** The last error report, kept so it can still be sent later. */
+    var lastReport: String
+        get() = p.getString("lastReport", "")!!
+        set(v) = p.edit().putString("lastReport", v).apply()
+
     fun enterSafeMode() {
         p.edit()
             .putInt("safeModeEntries", p.getInt("safeModeEntries", 0) + 1)

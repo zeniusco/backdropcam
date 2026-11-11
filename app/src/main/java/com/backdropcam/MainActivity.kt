@@ -180,8 +180,16 @@ class MainActivity : AppCompatActivity() {
 
         settings = AppSettings(this)
         CrashGuard.install(this)
-        val crashedLastTime = settings.sessionOpen
-        if (crashedLastTime) settings.enterSafeMode()
+        // The camera screen was still open when the app ended. Android's own record says whether
+        // that was a real problem or the app was simply closed (then nothing needs to change).
+        val exit = ExitInfo.last(this)
+        val crashedLastTime = settings.sessionOpen && (exit == null || exit.abnormal)
+        if (settings.sessionOpen && !crashedLastTime) settings.sessionOpen = false
+        if (crashedLastTime) {
+            lastExit = exit
+            // Out of memory or a freeze: lighter picture settings. Anything else: safe mode too.
+            if (exit?.memoryOrFreeze == true) settings.enterLightSettings() else settings.enterSafeMode()
+        }
         backdrops = BackdropStore(this)
         micGain = settings.micGain
         lastVideo = settings.lastVideo?.let(Uri::parse)
@@ -258,29 +266,71 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private var lastExit: ExitInfo.Last? = null
+
     /** After a crash: the app restarts in lighter settings; offer to share the error report. */
     private fun showCrashNotice() {
-        val report = CrashGuard.lastReport(this)
+        val exit = lastExit
+        val javaReport = CrashGuard.lastReport(this)
+        val mem = Runtime.getRuntime().maxMemory() / (1024 * 1024)
+        // Always a report: what Android recorded, what the app was doing, and the error if any.
+        val report = buildString {
+            append("BackdropKit ").append(runCatching { packageManager.getPackageInfo(packageName, 0).versionName }.getOrNull()).append('\n')
+            append("Phone: ${Build.MANUFACTURER} ${Build.MODEL}, Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT}), ")
+            append("memory tier ${settings.memoryTier}, app memory limit $mem MB\n\n")
+            if (exit != null) append(exit.details).append('\n')
+            else append("No exit record (Android 10 or older, or none kept).\n\n")
+            append("Just before: ").append(settings.lastState.ifBlank { "unknown" }).append("\n\n")
+            if (javaReport != null) append("Error:\n").append(javaReport)
+        }.take(20000)
+        settings.lastReport = report
+        val safe = settings.safeMode
         val b = MaterialAlertDialogBuilder(this)
             .setTitle("BackdropKit closed unexpectedly")
             .setMessage(
-                "It has restarted with lighter settings for this phone: 720p, Fast cut-out, and the " +
-                    "cut-out running on the processor instead of the graphics chip. You can raise them again in Settings." +
-                    if (report != null) "\n\nSending the error report helps fix the cause." else ""
+                (exit?.summary?.takeIf { it.isNotBlank() }?.let { "$it\n\n" } ?: "") +
+                    "It has restarted with lighter settings for this phone: 720p and Fast cut-out" +
+                    (if (safe) ", with the cut-out running on the processor instead of the graphics chip" else "") +
+                    ". You can raise them again in Settings.\n\nSending the error report helps fix the cause."
             )
             .setPositiveButton("OK", null)
-        if (report != null) b.setNeutralButton("Send report") { _, _ ->
-            startActivitySafe(
-                Intent.createChooser(
-                    Intent(Intent.ACTION_SEND).setType("text/plain")
-                        .putExtra(Intent.EXTRA_SUBJECT, "BackdropKit error report")
-                        .putExtra(Intent.EXTRA_TEXT, report),
-                    "Send report"
-                )
-            )
-        }
+            .setNeutralButton("Send report") { _, _ -> sendReport(report) }
         b.show()
         CrashGuard.clear(this)
+    }
+
+    private fun sendReport(report: String) {
+        startActivitySafe(
+            Intent.createChooser(
+                Intent(Intent.ACTION_SEND).setType("text/plain")
+                    .putExtra(Intent.EXTRA_SUBJECT, "BackdropKit error report")
+                    .putExtra(Intent.EXTRA_TEXT, report),
+                "Send report"
+            )
+        )
+    }
+
+    /** Notes every few seconds what the app is doing, so an error report can say what led up to it. */
+    private val stateTick = object : Runnable {
+        override fun run() {
+            if (!foreground) return
+            val am = getSystemService(ACTIVITY_SERVICE) as android.app.ActivityManager
+            val mi = android.app.ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }
+            val rt = Runtime.getRuntime()
+            val appMb = ((rt.totalMemory() - rt.freeMemory()) + android.os.Debug.getNativeHeapAllocatedSize()) / (1024 * 1024)
+            val bd = when {
+                settings.backdrop == KEY_NONE -> "none"
+                settings.backdrop == KEY_BLUR -> "blur"
+                backdrops.isVideo(settings.backdrop) -> "video"
+                else -> "picture"
+            }
+            settings.lastState = "quality ${settings.quality}, view ${settings.viewMode}, " +
+                "${if (settings.frontCamera) "front" else "back"} camera, backdrop $bd, " +
+                "${if (settings.highQualityCutout) "best" else "fast"} cut-out on ${if (settings.safeMode) "processor" else "graphics chip"}, " +
+                "${if (recorder != null) "recording" else "not recording"}, open for ${(System.currentTimeMillis() - resumedAtMs) / 1000} s; " +
+                "${engine.statsText}; phone memory free ${mi.availMem / (1024 * 1024)} MB${if (mi.lowMemory) " (LOW)" else ""}, app $appMb MB"
+            main.postDelayed(this, 5000)
+        }
     }
 
     // ---- light check: "too dark" comes from the camera's exposure (ISO x time), which measures the
@@ -379,6 +429,8 @@ class MainActivity : AppCompatActivity() {
         settings.sessionOpen = true
         foreground = true
         resumedAtMs = System.currentTimeMillis()
+        main.removeCallbacks(stateTick)
+        main.postDelayed(stateTick, 5000)
         // Camera access may have been allowed in the phone's Settings while the app was away.
         if (!cameraStarted && granted(Manifest.permission.CAMERA)) bindCamera()
         if (playbackPauses == 0) engine.setBackdropVideoPlaying(true)
@@ -392,6 +444,7 @@ class MainActivity : AppCompatActivity() {
         super.onPause()
         settings.sessionOpen = false
         foreground = false
+        main.removeCallbacks(stateTick)
         // A session that ran for a while without trouble counts towards leaving safe mode.
         if (System.currentTimeMillis() - resumedAtMs > 30_000) settings.noteCleanSession()
         engine.setBackdropVideoPlaying(false)
@@ -471,6 +524,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupButtons() {
         ui.settingsBtn.setOnClickListener { showSettings() }
+        // Long-press: send the last error report again (if there is one).
+        ui.settingsBtn.setOnLongClickListener {
+            val r = settings.lastReport
+            if (r.isBlank()) hint("No error report saved") else sendReport(r)
+            true
+        }
         ui.flashBtn.setOnClickListener { toggleTorch() }
         ui.aspectChip.setOnClickListener { cycleViewMode() }
         ui.qualityChip.setOnClickListener { cycleQuality() }

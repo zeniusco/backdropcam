@@ -1277,6 +1277,8 @@ class CompositeEngine(context: Context) {
     // ================================================================== setup
 
     private fun initGl() {
+        // The picture comes first: this thread runs ahead of background work on a busy phone.
+        runCatching { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DISPLAY) }
         display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
         val v = IntArray(2)
         EGL14.eglInitialize(display, v, 0, v, 1)
