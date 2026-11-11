@@ -189,6 +189,9 @@ class MainActivity : AppCompatActivity() {
             lastExit = exit
             // Out of memory or a freeze: lighter picture settings. Anything else: safe mode too.
             if (exit?.memoryOrFreeze == true) settings.enterLightSettings() else settings.enterSafeMode()
+            // A crash below the app (or one Android kept no record of): never use the graphics
+            // chip for the cut-out again in this version of the app.
+            if (exit == null || exit.nativeCrash) settings.gpuBlockedVersion = appVersionCode()
         }
         backdrops = BackdropStore(this)
         micGain = settings.micGain
@@ -326,7 +329,7 @@ class MainActivity : AppCompatActivity() {
             }
             settings.lastState = "quality ${settings.quality}, view ${settings.viewMode}, " +
                 "${if (settings.frontCamera) "front" else "back"} camera, backdrop $bd, " +
-                "${if (settings.highQualityCutout) "best" else "fast"} cut-out on ${if (settings.safeMode) "processor" else "graphics chip"}, " +
+                "${if (settings.highQualityCutout) "best" else "fast"} cut-out on $cutoutWhere, " +
                 "${if (recorder != null) "recording" else "not recording"}, open for ${(System.currentTimeMillis() - resumedAtMs) / 1000} s; " +
                 "${engine.statsText}; phone memory free ${mi.availMem / (1024 * 1024)} MB${if (mi.lowMemory) " (LOW)" else ""}, app $appMb MB"
             main.postDelayed(this, 5000)
@@ -364,7 +367,7 @@ class MainActivity : AppCompatActivity() {
             val appMb = ((rt.totalMemory() - rt.freeMemory()) + android.os.Debug.getNativeHeapAllocatedSize()) / (1024 * 1024)
             v.text = engine.statsText.ifBlank { "Measuring…" } +
                 "\nphone memory free ${mi.availMem / (1024 * 1024)} MB${if (mi.lowMemory) " (LOW)" else ""}  ·  app $appMb MB" +
-                (if (settings.safeMode) "  ·  safe mode" else "")
+                "\ncut-out on $cutoutWhere" + (if (settings.safeMode) "  ·  safe mode" else "")
             main.postDelayed(this, 500)
         }
     }
@@ -459,6 +462,8 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         remote?.stop()
+        probeConn?.let { runCatching { unbindService(it) } }
+        probeConn = null
         if (Build.VERSION.SDK_INT >= 29) (thermalListener as? PowerManager.OnThermalStatusChangedListener)?.let { l ->
             runCatching { getSystemService(PowerManager::class.java)?.removeThermalStatusListener(l) }
         }
@@ -906,18 +911,96 @@ class MainActivity : AppCompatActivity() {
 
     // ================================================================== cut-out, backdrops, adjust panel
 
+    private fun appVersionCode(): Long = runCatching {
+        val pi = packageManager.getPackageInfo(packageName, 0)
+        if (Build.VERSION.SDK_INT >= 28) pi.longVersionCode else @Suppress("DEPRECATION") pi.versionCode.toLong()
+    }.getOrDefault(0L)
+
+    private fun gpuKey(hq: Boolean) =
+        "${if (hq) "hq" else "fast"}_${appVersionCode()}_${Build.FINGERPRINT.hashCode()}"
+
+    /** Where the cut-out runs right now, for the readout and the error report. */
+    @Volatile private var cutoutWhere = "processor"
+
+    /**
+     * Loads the cut-out model. It runs on the graphics chip only once a check in a separate
+     * process has shown that this works on this phone (on some phones it crashes the whole
+     * app). Until then, and wherever it does not work, it runs on the processor.
+     */
     private fun loadSegmenter() {
         val hq = settings.highQualityCutout
+        val key = gpuKey(hq)
+        val blocked = settings.safeMode || settings.gpuBlockedVersion == appVersionCode()
+        val state = if (blocked) 2 else settings.gpuState(key)
+        val gpu = state == 1
         // Little memory: let go of the old model before loading the new one.
         if (settings.memoryTier < 2) engine.closeSegmenter()
         io.execute {
             try {
-                val gpu = !settings.safeMode
-                engine.setSegmenter(PersonSegmenter(this, hq, allowGpu = gpu))
+                val seg = PersonSegmenter(this, hq, allowGpu = gpu)
+                cutoutWhere = (if (seg.onGpu) "graphics chip" else "processor") +
+                    when { blocked -> " (graphics chip switched off)"; state == 0 -> " (graphics chip not checked yet)"; state == 2 -> " (graphics chip does not work here)"; else -> "" }
+                engine.setSegmenter(seg)
             } catch (e: Throwable) {
                 main.post { hint("Could not load the cut-out model") }
             }
         }
+        if (state == 0) main.postDelayed({ probeGpu(hq, key) }, 2500)
+    }
+
+    private var probeConn: android.content.ServiceConnection? = null
+
+    private fun probeGpu(hq: Boolean, key: String) {
+        if (probeConn != null || isFinishing || isDestroyed || settings.gpuState(key) != 0) return
+        // Two tries that never gave an answer count as "does not work".
+        if (settings.gpuAttempts(key) >= 2) return settings.setGpuState(key, 2)
+        settings.countGpuAttempt(key)
+        var done = false
+        lateinit var conn: android.content.ServiceConnection
+        val timeout = Runnable {
+            if (!done) {
+                done = true
+                probeConn = null
+                runCatching { unbindService(conn) }
+            }
+        }
+        fun finish(ok: Boolean) {
+            if (done) return
+            done = true
+            probeConn = null
+            main.removeCallbacks(timeout)
+            runCatching { unbindService(conn) }
+            settings.setGpuState(key, if (ok) 1 else 2)
+            // Works: switch the cut-out over to the graphics chip now.
+            if (!isFinishing && !isDestroyed && settings.highQualityCutout == hq) {
+                if (ok && recorder == null && countdown == null) loadSegmenter()
+                else if (!ok) cutoutWhere = "processor (graphics chip does not work here)"
+            }
+        }
+        conn = object : android.content.ServiceConnection {
+            override fun onServiceConnected(name: android.content.ComponentName?, binder: android.os.IBinder?) {
+                val msg = android.os.Message.obtain(null, if (hq) 1 else 0)
+                msg.replyTo = android.os.Messenger(Handler(Looper.getMainLooper()) { m -> finish(m.what == 1); true })
+                try {
+                    android.os.Messenger(binder).send(msg)
+                } catch (e: Exception) {
+                    finish(false)
+                }
+            }
+            // The helper process ended without answering: the graphics chip crashed it.
+            override fun onServiceDisconnected(name: android.content.ComponentName?) = finish(false)
+            override fun onBindingDied(name: android.content.ComponentName?) = finish(false)
+            override fun onNullBinding(name: android.content.ComponentName?) = finish(false)
+        }
+        val bound = runCatching {
+            bindService(Intent(this, GpuProbeService::class.java), conn, BIND_AUTO_CREATE)
+        }.getOrDefault(false)
+        if (!bound) {
+            runCatching { unbindService(conn) }
+            return
+        }
+        probeConn = conn
+        main.postDelayed(timeout, 20_000)
     }
 
     private fun applyEngineOptions() {

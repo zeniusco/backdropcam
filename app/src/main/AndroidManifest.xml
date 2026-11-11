@@ -39,5 +39,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Tries the cut-out on the graphics chip in its own process, so a crash there cannot
+             close the camera screen. -->
+        <service
+            android:name=".GpuProbeService"
+            android:exported="false"
+            android:process=":probe" />
     </application>
 </manifest>

@@ -52,6 +52,8 @@ object ExitInfo {
         val abnormal: Boolean,
         /** The phone ran out of memory, or the app froze: lighter settings help, not safe mode. */
         val memoryOrFreeze: Boolean,
+        /** A crash inside the graphics, camera or cut-out layer (or one of unknown kind). */
+        val nativeCrash: Boolean,
         /** One plain sentence for the user. */
         val summary: String,
         /** Technical details for the error report. */
@@ -66,7 +68,9 @@ object ExitInfo {
     @androidx.annotation.RequiresApi(30)
     private fun read(context: Context): Last? {
         val am = context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
-        val info = am.getHistoricalProcessExitReasons(null, 0, 1).firstOrNull() ?: return null
+        // Only the camera screen's own process (not the small graphics-check helper).
+        val info = am.getHistoricalProcessExitReasons(null, 0, 8)
+            .firstOrNull { it.processName == context.packageName } ?: return null
         val desc = info.description ?: ""
         // Reason numbers are from android.app.ApplicationExitInfo.
         val (name, summary) = when (info.reason) {
@@ -105,7 +109,13 @@ object ExitInfo {
                 if (text.isNotBlank()) sb.append("\nTrace:\n").append(text).append('\n')
             }
         }
-        return Last(abnormal, info.reason == 3 || info.reason == 6 || info.reason == 9 || (info.reason == 2 && info.status == 9), summary, sb.toString())
+        return Last(
+            abnormal = abnormal,
+            memoryOrFreeze = info.reason == 3 || info.reason == 6 || info.reason == 9 || (info.reason == 2 && info.status == 9),
+            nativeCrash = info.reason == 5,
+            summary = summary,
+            details = sb.toString(),
+        )
     }
 
     /** The part of a freeze report that says what the app's main thread was stuck on. */

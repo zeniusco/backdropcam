@@ -31,6 +31,9 @@ class PersonSegmenter(context: Context, highQuality: Boolean, allowGpu: Boolean 
     private var usingGpu = allowGpu
     private var segmenter: ImageSegmenter = create()
     private var lastTs = 0L
+
+    /** True while the model runs on the graphics chip (false: on the processor). */
+    val onGpu: Boolean get() = usingGpu
     private var floats: FloatArray? = null
 
 

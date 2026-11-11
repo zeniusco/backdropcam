@@ -147,6 +147,19 @@ class AppSettings(context: Context) {
             .commit()
     }
 
+    // ---- cut-out on the graphics chip: 0 = not checked yet, 1 = works, 2 = does not.
+    // [key] names the model, the app version and the phone's software, so it is checked again
+    // after an update of either.
+    fun gpuState(key: String): Int = p.getInt("gpu_$key", 0)
+    fun setGpuState(key: String, state: Int) = p.edit().putInt("gpu_$key", state).apply()
+    fun gpuAttempts(key: String): Int = p.getInt("gpuTry_$key", 0)
+    fun countGpuAttempt(key: String) = p.edit().putInt("gpuTry_$key", gpuAttempts(key) + 1).apply()
+
+    /** App version in which the graphics chip crashed the app; it is not used again in that version. */
+    var gpuBlockedVersion: Long
+        get() = p.getLong("gpuBlockedVersion", -1L)
+        set(v) { p.edit().putLong("gpuBlockedVersion", v).commit() }
+
     /** What the app was doing a few seconds ago (kept for the error report). */
     var lastState: String
         get() = p.getString("lastState", "")!!
