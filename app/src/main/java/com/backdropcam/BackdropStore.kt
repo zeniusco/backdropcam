@@ -60,10 +60,11 @@ class BackdropStore(private val context: Context) {
         return f
     }
 
-    fun load(name: String): Bitmap? {
+    /** [maxSide]: longest side to load at (smaller on phones with little memory). */
+    fun load(name: String, maxSide: Int = 4096): Bitmap? {
         val f = file(name)
         if (!f.exists()) return null
-        return ImageUtils.decode({ f.inputStream() }, 4096)
+        return ImageUtils.decode({ f.inputStream() }, maxSide)
     }
 
     fun thumbnail(f: File): Bitmap? =

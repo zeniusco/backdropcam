@@ -130,7 +130,8 @@ class AppSettings(context: Context) {
      * sharper) cut-out comes back. Only if the app then crashes again does safe mode stay.
      */
     fun noteCleanSession() {
-        if (!safeMode) return
+        // Weak phones stay in safe mode: it is what keeps them stable.
+        if (!safeMode || lowEndPhone || memoryTier < 2) return
         val runs = p.getInt("safeCleanRuns", 0) + 1
         val e = p.edit().putInt("safeCleanRuns", runs)
         if (runs >= 3 && p.getInt("safeModeEntries", 0) < 2) e.putBoolean("safeMode", false)

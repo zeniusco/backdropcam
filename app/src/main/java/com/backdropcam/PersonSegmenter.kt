@@ -31,6 +31,7 @@ class PersonSegmenter(context: Context, highQuality: Boolean, allowGpu: Boolean 
     private var usingGpu = allowGpu
     private var segmenter: ImageSegmenter = create()
     private var lastTs = 0L
+    private var floats: FloatArray? = null
 
 
 
@@ -89,12 +90,14 @@ class PersonSegmenter(context: Context, highQuality: Boolean, allowGpu: Boolean 
         val invert = list.size >= 2
         val m = list[0]
         val n = m.width * m.height
-        val cur = FloatArray(n)
+        val cur = floats?.takeIf { it.size == n } ?: FloatArray(n).also { floats = it }
         ByteBufferExtractor.extract(m).asFloatBuffer().get(cur, 0, n)
 
         // Smoothing over time is done on the graphics chip (it sees every frame); here the mask
         // is only converted, which keeps this step fast.
-        val out = ByteArray(n)
+        // Reused from frame to frame: making fresh ones 30 times a second kept the phone busy
+        // tidying memory, which showed as stutter on phones with little of it.
+        val out = pool.poll()?.takeIf { it.size == n } ?: ByteArray(n)
         for (i in 0 until n) {
             val v = if (invert) 1f - cur[i] else cur[i]
             out[i] = (v.coerceIn(0f, 1f) * 255f).toInt().toByte()
@@ -108,6 +111,12 @@ class PersonSegmenter(context: Context, highQuality: Boolean, allowGpu: Boolean 
 
     companion object {
         private const val TAG = "PersonSegmenter"
+        private val pool = java.util.concurrent.ArrayBlockingQueue<ByteArray>(4)
+
+        /** Hands a mask's memory back for reuse once it has been used. */
+        fun recycle(mask: Mask) {
+            pool.offer(mask.data)
+        }
         const val MODEL_HQ = "selfie_multiclass_256x256.tflite"
         const val MODEL_FAST = "selfie_segmenter.tflite"
     }

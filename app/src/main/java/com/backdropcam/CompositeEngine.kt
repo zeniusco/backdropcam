@@ -82,6 +82,11 @@ class CompositeEngine(context: Context) {
     private var smallFbo = 0
     private var smallW = 0
     private var smallH = 0
+    // The blurred background, worked out once per frame at small size. The screen and the video
+    // then only look it up (before, every pixel of both redid the whole blur: about 150 texture
+    // reads per pixel, far too much for a weak graphics chip).
+    private var blurTex = 0
+    private var blurFbo = 0
     private var roiTex = 0       // square crop around the person, input of the segmentation
     private var roiFbo = 0
     private var cameraTexture: SurfaceTexture? = null
@@ -249,6 +254,24 @@ class CompositeEngine(context: Context) {
         }
     }
 
+    /**
+     * Closes the current model before a new one is loaded, so the two are never in memory at
+     * the same time (for phones with little memory). Until the new one arrives only the
+     * backdrop or blur is shown.
+     */
+    fun closeSegmenter() {
+        try {
+            segExecutor.execute {
+                val old = segmenter
+                segmenter = null
+                old?.close()
+            }
+            handler.post { invalidateMask() }
+        } catch (e: RejectedExecutionException) {
+            // the engine was released meanwhile
+        }
+    }
+
     fun setMode(newMode: Int) {
         handler.post {
             if (newMode != MODE_IMAGE) stopBackdropVideo() // no need to keep decoding it
@@ -326,6 +349,7 @@ class CompositeEngine(context: Context) {
             bgAspect = bitmap.width.toFloat() / bitmap.height
             bgReady = true
             mode = MODE_IMAGE
+            bitmap.recycle() // it lives on the graphics chip now; free the copy at once
         }
     }
 
@@ -582,6 +606,10 @@ class CompositeEngine(context: Context) {
         val t0 = SystemClock.uptimeMillis()
         try {
             handleCameraFrame()
+        } catch (t: Throwable) {
+            // One bad frame (e.g. the phone is out of memory for a moment) is left out; the app
+            // must not close for it.
+            Log.e(TAG, "frame failed", t)
         } finally {
             noteGlBusy(SystemClock.uptimeMillis() - t0)
         }
@@ -592,6 +620,7 @@ class CompositeEngine(context: Context) {
     private var glBusyMs = 0L
     private var glWindowStart = 0L
     private var glSlowWindows = 0
+    @Volatile private var glBusyPct = 0
 
     private fun noteGlBusy(ms: Long) {
         val now = SystemClock.uptimeMillis()
@@ -600,6 +629,7 @@ class CompositeEngine(context: Context) {
         val span = now - glWindowStart
         if (span < 3000) return
         val busy = glBusyMs.toFloat() / span
+        glBusyPct = (busy * 100f).roundToInt()
         glBusyMs = 0
         glWindowStart = now
         glSlowWindows = if (busy > 0.8f) glSlowWindows + 1 else 0
@@ -813,17 +843,22 @@ class CompositeEngine(context: Context) {
                     val m = mask
                     handler.post {
                         val t1 = SystemClock.uptimeMillis()
-                        if (r.gen == maskGen && m != null) {
-                            uploadMask(m, r.roi)
-                        }
-                        // Show and record this frame with its own cut-out (and any frame just
-                        // before it that could not be sent, with this very close one).
-                        presentPendingUpTo(r.id)
                         bitmapPool.offer(bmp)
                         inFlight.decrementAndGet()
-                        // The newest frame still waiting goes to the model straight away.
-                        ring.filter { it.pending && !it.submitted }.maxByOrNull { it.id }?.let { w ->
-                            if (inFlight.get() < 2) w.submitted = submitSegmentation(w)
+                        try {
+                            if (r.gen == maskGen && m != null) {
+                                uploadMask(m, r.roi)
+                            }
+                            if (m != null) PersonSegmenter.recycle(m)
+                            // Show and record this frame with its own cut-out (and any frame just
+                            // before it that could not be sent, with this very close one).
+                            presentPendingUpTo(r.id)
+                            // The newest frame still waiting goes to the model straight away.
+                            ring.filter { it.pending && !it.submitted }.maxByOrNull { it.id }?.let { w ->
+                                if (inFlight.get() < 2) w.submitted = submitSegmentation(w)
+                            }
+                        } catch (t: Throwable) {
+                            Log.e(TAG, "frame failed", t)
                         }
                         noteGlBusy(SystemClock.uptimeMillis() - t1)
                     }
@@ -872,6 +907,8 @@ class CompositeEngine(context: Context) {
         return floatArrayOf(0.5f - hx, 0.5f - hy, 0.5f + hx, 0.5f + hy)
     }
 
+    private var framingPixels: IntArray? = null
+
     /** Runs on the segmentation thread. Converts the crop's mask into whole-picture framing. */
     private fun reportFraming(mask: PersonSegmenter.Mask, frame: Bitmap, roi: FloatArray, mirrored: Boolean) {
         val cb = onFraming ?: return
@@ -879,7 +916,8 @@ class CompositeEngine(context: Context) {
         if (now - lastFramingMs < 150) return
         lastFramingMs = now
         val n = mask.width
-        val pixels = IntArray(n * n).also { frame.getPixels(it, 0, n, 0, 0, n, n) }
+        val pixels = framingPixels?.takeIf { it.size == n * n } ?: IntArray(n * n).also { framingPixels = it }
+        frame.getPixels(pixels, 0, n, 0, 0, n, n)
         var sr = 0L; var sg = 0L; var sb = 0L
         var count = 0
         var sumX = 0.0
@@ -944,8 +982,8 @@ class CompositeEngine(context: Context) {
             val fps = statFrames * 1000f / span
             val cam = statCamFrames * 1000f / span
             statsText = String.format(
-                java.util.Locale.US, "%.0f fps shown  ·  %.0f fps camera  ·  cut-out %.0f ms  ·  %dx%d",
-                fps, cam, segTimeAvg, naturalWidth, naturalHeight,
+                java.util.Locale.US, "%.0f fps shown  ·  %.0f fps camera  ·  cut-out %.0f ms  ·  drawing %d%%  ·  %dx%d",
+                fps, cam, segTimeAvg, glBusyPct, naturalWidth, naturalHeight,
             )
             statFrames = 0; statCamFrames = 0; statStart = now
         }
@@ -1031,6 +1069,11 @@ class CompositeEngine(context: Context) {
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, smallFbo)
         // Flipped so the blur texture's rows run top to bottom, like the mask.
         render(smallW, smallH, flipYC(), MODE_RAW, slot.tex)
+        // Then blur it (leaving the person out), once, at this small size.
+        if (blurFbo != 0) {
+            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, blurFbo)
+            render(smallW, smallH, flipYC(), MODE_BLURPASS, slot.tex)
+        }
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
     }
 
@@ -1097,6 +1140,15 @@ class CompositeEngine(context: Context) {
         setLinear(GLES30.GL_TEXTURE_2D)
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, smallFbo)
         GLES30.glFramebufferTexture2D(GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0, GLES30.GL_TEXTURE_2D, smallTex, 0)
+        if (blurTex == 0) {
+            val t = IntArray(1); GLES30.glGenTextures(1, t, 0); blurTex = t[0]
+            val f = IntArray(1); GLES30.glGenFramebuffers(1, f, 0); blurFbo = f[0]
+        }
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, blurTex)
+        GLES30.glTexImage2D(GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA, sw, sh, 0, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, null)
+        setLinear(GLES30.GL_TEXTURE_2D)
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, blurFbo)
+        GLES30.glFramebufferTexture2D(GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0, GLES30.GL_TEXTURE_2D, blurTex, 0)
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
     }
 
@@ -1133,6 +1185,10 @@ class CompositeEngine(context: Context) {
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, if (renderMode == MODE_RAW) bgTex else smallTex)
         GLES30.glActiveTexture(GLES30.GL_TEXTURE3)
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, bgTex)
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE4)
+        // Never bind the texture we are rendering into.
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, if (renderMode == MODE_BLURPASS || blurTex == 0) bgTex else blurTex)
+        GLES30.glUniform1i(loc("uBlur"), 4)
         GLES30.glActiveTexture(GLES30.GL_TEXTURE5)
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, maskFullTex)
         GLES30.glUniform1i(loc("uMaskFull"), 5)
@@ -1334,6 +1390,7 @@ class CompositeEngine(context: Context) {
         const val MODE_IMAGE = 2  // backdrop image
         private const val MODE_RAW = 3
         private const val MODE_ALPHA = 4 // steadied cut-out pass
+        private const val MODE_BLURPASS = 5 // blurred background, at small size
 
         private fun identity() = FloatArray(16).also { Matrix.setIdentityM(it, 0) }
 
@@ -1407,6 +1464,7 @@ uniform sampler2D uFrame;   // upright camera frame (natural space), with mipmap
 uniform sampler2D uMaskFull; // person mask of the whole picture (uFullRect)
 uniform vec4 uFullRect;
 uniform sampler2D uSmall;   // small copy of the picture, for the blur effect
+uniform sampler2D uBlur;    // the blurred background made from it (same small size)
 uniform sampler2D uBg;
 uniform samplerExternalOES uBgVideo;
 uniform mat4 uBgVideoM;
@@ -1520,7 +1578,32 @@ float rawAlpha(vec2 p, vec3 cam) {
     return m;
 }
 
+// Blur of the background only: taps on the person are left out, so dark hair or clothes are
+// not smeared into the blurred room as a shadow around you. t: small-picture coordinates.
+vec3 blurAt(vec2 t) {
+    vec3 acc = vec3(0.0);
+    vec3 all = vec3(0.0);
+    float ws = 0.0;
+    for (int i = -3; i <= 3; i++) {
+        for (int j = -3; j <= 3; j++) {
+            vec2 tt = t + vec2(float(i), float(j)) * uSmallTexel * 2.2;
+            vec3 col = texture(uSmall, tt).rgb;
+            float wb = 1.0 - (uHasMask > 0.5 ? maskAt(vec2(tt.x, 1.0 - tt.y)) : 0.0);
+            wb *= wb;
+            acc += col * wb;
+            ws += wb;
+            all += col;
+        }
+    }
+    return ws > 0.05 ? acc / ws : all / 49.0;
+}
+
 void main() {
+    if (uMode > 4.5) {
+        // Blur pass: done once per frame at small size; the final picture only looks it up.
+        outColor = vec4(blurAt(img(vW)), 1.0);
+        return;
+    }
     if (uMode > 3.5) {
         // Alpha pass: the cut-out of the camera picture, steadied over time. Where the picture
         // did not change since the last frame, the edge keeps most of its previous value, so
@@ -1587,24 +1670,8 @@ void main() {
     if (m > 0.998 && wrap < 0.004) {
         // Fully covered by you: the background is not visible here, skip it.
     } else if (uMode < 1.5) {
-        // Blur only the background: taps on the person are left out, so dark hair or clothes
-        // are not smeared into the blurred room as a shadow around you.
-        vec2 t = img(vW);
-        vec3 acc = vec3(0.0);
-        vec3 all = vec3(0.0);
-        float ws = 0.0;
-        for (int i = -3; i <= 3; i++) {
-            for (int j = -3; j <= 3; j++) {
-                vec2 tt = t + vec2(float(i), float(j)) * uSmallTexel * 2.2;
-                vec3 col = texture(uSmall, tt).rgb;
-                float wb = 1.0 - (uHasMask > 0.5 ? maskAt(vec2(tt.x, 1.0 - tt.y)) : 0.0);
-                wb *= wb;
-                acc += col * wb;
-                ws += wb;
-                all += col;
-            }
-        }
-        bg = ws > 0.05 ? acc / ws : all / 49.0;
+        // The blurred background was worked out once for this frame (blur pass above).
+        bg = texture(uBlur, img(vW)).rgb;
     } else {
         vec2 visible = (vW - 0.5) / uCrop + 0.5; // backdrop fills the visible (cropped) area
         vec2 bt = (img(visible) - 0.5) * uBgScale + 0.5;  // rows top to bottom

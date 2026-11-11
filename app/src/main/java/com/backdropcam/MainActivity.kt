@@ -308,7 +308,13 @@ class MainActivity : AppCompatActivity() {
     private val statsTick = object : Runnable {
         override fun run() {
             val v = statsView ?: return
-            v.text = engine.statsText.ifBlank { "Measuring…" }
+            val am = getSystemService(ACTIVITY_SERVICE) as android.app.ActivityManager
+            val mi = android.app.ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }
+            val rt = Runtime.getRuntime()
+            val appMb = ((rt.totalMemory() - rt.freeMemory()) + android.os.Debug.getNativeHeapAllocatedSize()) / (1024 * 1024)
+            v.text = engine.statsText.ifBlank { "Measuring…" } +
+                "\nphone memory free ${mi.availMem / (1024 * 1024)} MB${if (mi.lowMemory) " (LOW)" else ""}  ·  app $appMb MB" +
+                (if (settings.safeMode) "  ·  safe mode" else "")
             main.postDelayed(this, 500)
         }
     }
@@ -843,11 +849,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun loadSegmenter() {
         val hq = settings.highQualityCutout
+        // Little memory: let go of the old model before loading the new one.
+        if (settings.memoryTier < 2) engine.closeSegmenter()
         io.execute {
             try {
                 val gpu = !settings.safeMode
                 engine.setSegmenter(PersonSegmenter(this, hq, allowGpu = gpu))
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 main.post { hint("Could not load the cut-out model") }
             }
         }
@@ -964,7 +972,10 @@ class MainActivity : AppCompatActivity() {
                     engine.setBackdropVideo(file.absolutePath, aspect)
                     return@execute
                 }
-                val bmp = backdrops.load(key)
+                // No larger than the phone can use: a full-size picture takes about 40 MB twice.
+                val bmp = runCatching {
+                    backdrops.load(key, when (settings.memoryTier) { 0 -> 1920; 1 -> 2560; else -> 4096 })
+                }.getOrNull()
                 if (bmp != null) {
                     backdropMean = ImageUtils.meanColor(bmp)
                     engine.setBackdrop(bmp)
