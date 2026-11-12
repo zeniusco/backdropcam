@@ -180,6 +180,7 @@ class MainActivity : AppCompatActivity() {
 
         settings = AppSettings(this)
         CrashGuard.install(this)
+        PerfLog.begin(this)
         // The camera screen was still open when the app ended. Android's own record says whether
         // that was a real problem or the app was simply closed (then nothing needs to change).
         val exit = ExitInfo.last(this)
@@ -203,7 +204,8 @@ class MainActivity : AppCompatActivity() {
                 lastFraming = f
                 warnIfHeadCut(f)
             }
-            onTooSlow = { lightMode = true; easeForSlowPhone() }
+            onTooSlow = { lightMode = true; PerfLog.add("too slow: easing settings"); easeForSlowPhone() }
+            onPreviewLost = { restorePreviewSurface() }
             lightMode = settings.lowEndPhone || settings.safeMode
         }
         applyEngineOptions()
@@ -275,18 +277,7 @@ class MainActivity : AppCompatActivity() {
     private fun showCrashNotice() {
         val exit = lastExit
         val javaReport = CrashGuard.lastReport(this)
-        val mem = Runtime.getRuntime().maxMemory() / (1024 * 1024)
-        // Always a report: what Android recorded, what the app was doing, and the error if any.
-        val report = buildString {
-            append("BackdropKit ").append(runCatching { packageManager.getPackageInfo(packageName, 0).versionName }.getOrNull()).append('\n')
-            append("Phone: ${Build.MANUFACTURER} ${Build.MODEL}, Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT}), ")
-            append("memory tier ${settings.memoryTier}, app memory limit $mem MB\n\n")
-            if (exit != null) append(exit.details).append('\n')
-            else append("No exit record (Android 10 or older, or none kept).\n\n")
-            append("Just before: ").append(settings.lastState.ifBlank { "unknown" }).append("\n\n")
-            if (javaReport != null) append("Error:\n").append(javaReport)
-        }.take(20000)
-        settings.lastReport = report
+        val report = buildReport(exit, javaReport)
         val safe = settings.safeMode
         val b = MaterialAlertDialogBuilder(this)
             .setTitle("BackdropKit closed unexpectedly")
@@ -313,28 +304,67 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    /** Notes every few seconds what the app is doing, so an error report can say what led up to it. */
+    /**
+     * Every 5 seconds: one line in the running record about the drawing thread (how long each
+     * step took, how long it kept new work waiting) and one about the phone (memory, heat,
+     * whether this screen itself was held up). This is what shows a slow-down building up.
+     */
+    private var stateTicks = 0
+    private var stateDueMs = 0L
     private val stateTick = object : Runnable {
         override fun run() {
             if (!foreground) return
+            val now = android.os.SystemClock.uptimeMillis()
+            val uiLate = if (stateDueMs == 0L) 0L else now - stateDueMs
+            stateDueMs = now + 5000
+            main.postDelayed(this, 5000)
+            engine.windowStats { PerfLog.add(it) }
             val am = getSystemService(ACTIVITY_SERVICE) as android.app.ActivityManager
             val mi = android.app.ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }
             val rt = Runtime.getRuntime()
-            val appMb = ((rt.totalMemory() - rt.freeMemory()) + android.os.Debug.getNativeHeapAllocatedSize()) / (1024 * 1024)
-            val bd = when {
-                settings.backdrop == KEY_NONE -> "none"
-                settings.backdrop == KEY_BLUR -> "blur"
-                backdrops.isVideo(settings.backdrop) -> "video"
-                else -> "picture"
+            val heat = if (Build.VERSION.SDK_INT >= 29) getSystemService(PowerManager::class.java)?.currentThermalStatus ?: -1 else -1
+            PerfLog.add(
+                "ui late $uiLate | ${if (recorder != null) "REC" else "idle"} q ${settings.quality} ${settings.viewMode} " +
+                    "${if (settings.frontCamera) "front" else "back"} bd ${backdropKind()} | ram free ${mi.availMem / (1024 * 1024)}" +
+                    "${if (mi.lowMemory) " LOW" else ""} | java ${(rt.totalMemory() - rt.freeMemory()) / (1024 * 1024)} " +
+                    "native ${android.os.Debug.getNativeHeapAllocatedSize() / (1024 * 1024)} | heat $heat | $cutoutWhere"
+            )
+            val n = ++stateTicks
+            // The slower measurements (total and graphics memory, threads, open files) every
+            // 30 seconds, and the record is saved every 15, both off this thread.
+            if (n % 6 == 1 || n % 3 == 0) io.execute {
+                if (n % 6 == 1) runCatching {
+                    val m = android.os.Debug.MemoryInfo().also { android.os.Debug.getMemoryInfo(it) }
+                    PerfLog.add(
+                        "mem total ${m.totalPss / 1024} graphics ${m.getMemoryStat("summary.graphics")?.toIntOrNull()?.div(1024)} " +
+                            "native ${m.getMemoryStat("summary.native-heap")?.toIntOrNull()?.div(1024)} | " +
+                            "threads ${File("/proc/self/task").list()?.size} files ${File("/proc/self/fd").list()?.size}"
+                    )
+                }
+                PerfLog.save(this@MainActivity)
             }
-            settings.lastState = "quality ${settings.quality}, view ${settings.viewMode}, " +
-                "${if (settings.frontCamera) "front" else "back"} camera, backdrop $bd, " +
-                "${if (settings.highQualityCutout) "best" else "fast"} cut-out on $cutoutWhere, " +
-                "${if (recorder != null) "recording" else "not recording"}, open for ${(System.currentTimeMillis() - resumedAtMs) / 1000} s; " +
-                "${engine.statsText}; phone memory free ${mi.availMem / (1024 * 1024)} MB${if (mi.lowMemory) " (LOW)" else ""}, app $appMb MB"
-            main.postDelayed(this, 5000)
         }
     }
+
+    private fun backdropKind() = when {
+        settings.backdrop == KEY_NONE -> "none"
+        settings.backdrop == KEY_BLUR -> "blur"
+        backdrops.isVideo(settings.backdrop) -> "video"
+        else -> "picture"
+    }
+
+    /** The error report: phone, why the app last ended (if it did), and the running record. */
+    private fun buildReport(exit: ExitInfo.Last?, javaReport: String?): String = buildString {
+        val mem = Runtime.getRuntime().maxMemory() / (1024 * 1024)
+        append("BackdropKit ").append(runCatching { packageManager.getPackageInfo(packageName, 0).versionName }.getOrNull()).append('\n')
+        append("Phone: ${Build.MANUFACTURER} ${Build.MODEL}, Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT}), ")
+        append("memory tier ${settings.memoryTier}, app memory limit $mem MB, safe mode ${settings.safeMode}\n\n")
+        if (exit != null) append(exit.details).append('\n')
+        if (javaReport != null) append("Error:\n").append(javaReport.take(6000)).append("\n\n")
+        append("This session:\n").append(PerfLog.dump(70)).append('\n')
+        val prev = PerfLog.previous(this@MainActivity, 70)
+        if (prev.isNotBlank()) append("Previous session:\n").append(prev).append('\n')
+    }.take(45000)
 
     // ---- light check: "too dark" comes from the camera's exposure (ISO x time), which measures the
     // room's light. The person's skin tone does not change it, so it cannot fire falsely for
@@ -433,7 +463,9 @@ class MainActivity : AppCompatActivity() {
         foreground = true
         resumedAtMs = System.currentTimeMillis()
         main.removeCallbacks(stateTick)
+        stateDueMs = 0L
         main.postDelayed(stateTick, 5000)
+        PerfLog.add("screen opened")
         // Camera access may have been allowed in the phone's Settings while the app was away.
         if (!cameraStarted && granted(Manifest.permission.CAMERA)) bindCamera()
         if (playbackPauses == 0) engine.setBackdropVideoPlaying(true)
@@ -448,6 +480,8 @@ class MainActivity : AppCompatActivity() {
         settings.sessionOpen = false
         foreground = false
         main.removeCallbacks(stateTick)
+        PerfLog.add("screen left")
+        io.execute { PerfLog.save(this) }
         // A session that ran for a while without trouble counts towards leaving safe mode.
         if (System.currentTimeMillis() - resumedAtMs > 30_000) settings.noteCleanSession()
         engine.setBackdropVideoPlaying(false)
@@ -521,18 +555,37 @@ class MainActivity : AppCompatActivity() {
         ui.surface.holder.addCallback(object : SurfaceHolder.Callback {
             override fun surfaceCreated(holder: SurfaceHolder) {}
             override fun surfaceChanged(holder: SurfaceHolder, format: Int, w: Int, h: Int) {
+                surfaceW = w; surfaceH = h; surfaceAlive = true
                 engine.setPreviewSurface(holder.surface, w, h)
             }
-            override fun surfaceDestroyed(holder: SurfaceHolder) = engine.clearPreviewSurface()
+            override fun surfaceDestroyed(holder: SurfaceHolder) {
+                surfaceAlive = false
+                engine.clearPreviewSurface()
+            }
         })
+    }
+
+    private var surfaceW = 0
+    private var surfaceH = 0
+    private var surfaceAlive = false
+    private var lastRestoreMs = 0L
+
+    /** The screen stopped showing new pictures: hand its surface to the engine again. */
+    private fun restorePreviewSurface() {
+        val now = System.currentTimeMillis()
+        if (!surfaceAlive || !foreground || isFinishing || now - lastRestoreMs < 1500) return
+        val surface = ui.surface.holder.surface ?: return
+        if (!surface.isValid || surfaceW == 0) return
+        lastRestoreMs = now
+        PerfLog.add("screen surface set up again")
+        engine.setPreviewSurface(surface, surfaceW, surfaceH)
     }
 
     private fun setupButtons() {
         ui.settingsBtn.setOnClickListener { showSettings() }
-        // Long-press: send the last error report again (if there is one).
+        // Long-press: send a report (how the app has been running, this session and the last).
         ui.settingsBtn.setOnLongClickListener {
-            val r = settings.lastReport
-            if (r.isBlank()) hint("No error report saved") else sendReport(r)
+            sendReport(buildReport(lastExit, null))
             true
         }
         ui.flashBtn.setOnClickListener { toggleTorch() }
@@ -1378,8 +1431,9 @@ class MainActivity : AppCompatActivity() {
                 personName = settings.personName,
             )
             rec.start()
-            engine.startRecording(rec.inputSurface, size.width, size.height, rotation, { rec.ptsNs() }, { rec.paused })
+            engine.startRecording(rec.inputSurface, size.width, size.height, rotation, { rec.ptsNs() }, { rec.paused || rec.problem != null })
             recorder = rec
+            PerfLog.add("recording started ${size.width}x${size.height} ${rec.videoMime}")
         } catch (e: Exception) {
             setShutter(false)
             return hint("Cannot start recording: ${e.message}")
@@ -1404,6 +1458,8 @@ class MainActivity : AppCompatActivity() {
         tickTimer()
     }
 
+    private val timerTick = Runnable { tickTimer() }
+
     private fun tickTimer() {
         val rec = recorder ?: return
         updateRecTime(rec)
@@ -1414,6 +1470,12 @@ class MainActivity : AppCompatActivity() {
         }
         // Stop by itself, and say why, as soon as the video can no longer be written. Otherwise
         // the timer would keep running while nothing is being saved.
+        // The drawing thread has been stuck waiting for the video encoder: shut the encoder down
+        // so the picture runs again. What was recorded so far is kept.
+        if (engine.encoderStuckMs() > 3000 && rec.problem == null) {
+            PerfLog.add("encoder stuck ${engine.encoderStuckMs()} ms: shutting it down")
+            rec.abort("The phone's video encoder stopped responding")
+        }
         val early = when {
             rec.problem != null -> rec.problem
             // Checked every few seconds: stop while there is still room to finish the file.
@@ -1426,7 +1488,9 @@ class MainActivity : AppCompatActivity() {
             stopRecording(early)
             return
         }
-        main.postDelayed({ tickTimer() }, 250)
+        // One timer only, however often recording is started (e.g. Retake straight after Stop).
+        main.removeCallbacks(timerTick)
+        main.postDelayed(timerTick, 250)
     }
 
     private fun updateRecTime(rec: VideoRecorder) {
@@ -1457,6 +1521,8 @@ class MainActivity : AppCompatActivity() {
     private fun stopRecording(stoppedEarly: String? = null) {
         val rec = recorder ?: return
         recorder = null
+        main.removeCallbacks(timerTick)
+        PerfLog.add("recording stopped${if (stoppedEarly != null) ": $stoppedEarly" else ""}")
         setShutter(false)
         recDotBlink?.cancel()
         recDotBlink = null
@@ -2015,6 +2081,7 @@ class MainActivity : AppCompatActivity() {
     // ================================================================== second-screen remote
 
     private var remote: RemoteServer? = null
+    private val snapshotQueued = java.util.concurrent.atomic.AtomicBoolean(false)
     private val remoteExecutor = Executors.newSingleThreadExecutor()
     @Volatile private var lastMicLevel = 0f
 
@@ -2052,11 +2119,17 @@ class MainActivity : AppCompatActivity() {
         engine.snapshotListener = listener@{ bmp ->
             // Skip this picture if the last one is still being compressed, so the laptop view
             // never falls behind the camera.
-            if (server.busy) return@listener
+            // At most one picture may be waiting: otherwise copies pile up in memory whenever
+            // compressing is slower than the camera.
+            if (server.busy || !snapshotQueued.compareAndSet(false, true)) return@listener
             val copy = bmp.copy(Bitmap.Config.ARGB_8888, false)
             remoteExecutor.execute {
-                server.pushFrame(copy)
-                copy.recycle()
+                try {
+                    server.pushFrame(copy)
+                } finally {
+                    copy.recycle()
+                    snapshotQueued.set(false)
+                }
             }
         }
         setActive(ui.remoteBtn, true)

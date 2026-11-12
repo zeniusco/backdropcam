@@ -398,8 +398,15 @@ class VideoRecorder(
                         lastPts[slot] = info.presentationTimeUs
                         buf.position(info.offset)
                         buf.limit(info.offset + info.size)
-                        sink.write(trackIndex[slot], buf, info)
-                        bytesWritten += info.size
+                        // A failed write is remembered, but the encoder is still emptied below.
+                        // If it were left full, the picture would freeze: the drawing thread
+                        // waits for room in the encoder.
+                        try {
+                            sink.write(trackIndex[slot], buf, info)
+                            bytesWritten += info.size
+                        } catch (t: Throwable) {
+                            noteFailure(t)
+                        }
                     }
                     codec.releaseOutputBuffer(idx, false)
                     if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) return true
@@ -407,11 +414,25 @@ class VideoRecorder(
             }
             return false
         } catch (t: Throwable) {
-            // Typically the storage is full or the encoder died. Stop writing; finish() reports it.
-            if (failure == null) failure = if (t is java.io.IOException || t.message?.contains("space", true) == true)
-                "The phone's storage is full" else "Recording failed: ${t.message ?: t.javaClass.simpleName}"
+            // The encoder itself failed. Stop; finish() reports it.
+            noteFailure(t)
             return true
         }
+    }
+
+    private fun noteFailure(t: Throwable) {
+        PerfLog.error("recorder", t)
+        if (failure == null) failure = if (t is java.io.IOException || t.message?.contains("space", true) == true)
+            "The phone's storage is full" else "Recording failed: ${t.message ?: t.javaClass.simpleName}"
+    }
+
+    /**
+     * The video encoder stopped taking pictures (the drawing thread is stuck waiting for it).
+     * Shutting the encoder down frees the drawing thread; what was recorded so far is kept.
+     */
+    fun abort(reason: String) {
+        if (failure == null) failure = reason
+        Thread({ runCatching { videoCodec.stop() } }, "encoder-abort").start()
     }
 
     /** Starts the muxer once every track is known and queues early samples until then. */

@@ -98,6 +98,58 @@ class CompositeEngine(context: Context) {
     private val locs = HashMap<String, Int>()
     private val copyLocs = HashMap<String, Int>()
 
+    // ------------------------------------------------------------------ running record
+    // How long each step takes (drawing thread only): 0 camera copy, 1 picture for the model,
+    // 2 cut-out pass, 3 screen, 4 video encoder, 5 remote picture.
+    private val stSum = LongArray(6)
+    private val stMax = LongArray(6)
+    private val stN = IntArray(6)
+    private var wCam = 0
+    private var wShown = 0
+    private var wEnc = 0
+    private var wFailScreen = 0
+    private var wFailVideo = 0
+    private var wErr = 0
+    private val wSegN = java.util.concurrent.atomic.AtomicInteger()
+    private val wSegSum = java.util.concurrent.atomic.AtomicLong()
+    private val wSegMax = java.util.concurrent.atomic.AtomicLong()
+
+    private fun stage(i: Int, t0: Long) {
+        val d = SystemClock.uptimeMillis() - t0
+        stSum[i] += d
+        if (d > stMax[i]) stMax[i] = d
+        stN[i]++
+    }
+
+    /** When the drawing thread began handing a frame to the video encoder (0 = it is not). */
+    @Volatile private var encoderSwapStart = 0L
+
+    /** How long the drawing thread has been stuck waiting for the video encoder, in ms. */
+    fun encoderStuckMs(): Long = encoderSwapStart.let { if (it == 0L) 0L else SystemClock.uptimeMillis() - it }
+
+    /** Called (main thread) when the screen surface stopped accepting pictures and must be set again. */
+    var onPreviewLost: (() -> Unit)? = null
+    private var screenFails = 0
+
+    /** One line about the last few seconds, handed to [cb] on the drawing thread. */
+    fun windowStats(cb: (String) -> Unit) {
+        val posted = SystemClock.uptimeMillis()
+        handler.post {
+            val wait = SystemClock.uptimeMillis() - posted
+            fun s(i: Int) = "${if (stN[i] > 0) stSum[i] / stN[i] else 0}/${stMax[i]}"
+            val n = wSegN.getAndSet(0)
+            val sum = wSegSum.getAndSet(0)
+            val mx = wSegMax.getAndSet(0)
+            val line = "gl in $wCam shown $wShown enc $wEnc | ms avg/max copy ${s(0)} prep ${s(1)} alpha ${s(2)} " +
+                "screen ${s(3)} video ${s(4)} remote ${s(5)} | wait $wait | model n $n avg ${if (n > 0) sum / n else 0} max $mx | " +
+                "inflight ${inFlight.get()} reads ${reads.size} held ${ring.count { it.pending }} | " +
+                "swapfail $wFailScreen/$wFailVideo err $wErr | ${naturalWidth}x$naturalHeight mode $mode"
+            java.util.Arrays.fill(stSum, 0); java.util.Arrays.fill(stMax, 0); java.util.Arrays.fill(stN, 0)
+            wCam = 0; wShown = 0; wEnc = 0; wFailScreen = 0; wFailVideo = 0; wErr = 0
+            cb(line)
+        }
+    }
+
     // ------------------------------------------------------------------ frame ring
     private class Slot(val tex: Int, val fbo: Int) {
         var id = 0L
@@ -216,7 +268,11 @@ class CompositeEngine(context: Context) {
             } catch (e: Exception) {
                 EGL14.EGL_NO_SURFACE
             }
-            if (previewSurface == EGL14.EGL_NO_SURFACE) return@post
+            if (previewSurface == EGL14.EGL_NO_SURFACE) {
+                ContextCompat.getMainExecutor(appContext).execute { onPreviewLost?.invoke() }
+                return@post
+            }
+            screenFails = 0
             previewW = w; previewH = h
             // Frames can come in short bursts (when a mask arrives); never wait for the display.
             EGL14.eglMakeCurrent(display, previewSurface, previewSurface, eglContext)
@@ -610,6 +666,8 @@ class CompositeEngine(context: Context) {
             // One bad frame (e.g. the phone is out of memory for a moment) is left out; the app
             // must not close for it.
             Log.e(TAG, "frame failed", t)
+            wErr++
+            PerfLog.error("frame", t)
         } finally {
             noteGlBusy(SystemClock.uptimeMillis() - t0)
         }
@@ -643,6 +701,7 @@ class CompositeEngine(context: Context) {
     private fun handleCameraFrame() {
         if (reads.isNotEmpty()) pollReads()
         val st = cameraTexture ?: return
+        val tCopy = SystemClock.uptimeMillis()
         makeCurrentAny()
         try {
             st.updateTexImage()
@@ -694,6 +753,8 @@ class CompositeEngine(context: Context) {
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, slot.tex)
         GLES30.glGenerateMipmap(GLES30.GL_TEXTURE_2D)
 
+        stage(0, tCopy)
+        wCam++
         val now = SystemClock.uptimeMillis()
         statCamFrames++
         slot.id = ++frameCounter
@@ -713,7 +774,9 @@ class CompositeEngine(context: Context) {
         //    the cut-out never lags behind your movement. Two frames are worked on at once (one
         //    in the model, the next one already prepared), so the model never waits; only a
         //    frame arriving while both places are taken is left out.
+        val tPrep = SystemClock.uptimeMillis()
         slot.submitted = inFlight.get() < 2 && submitSegmentation(slot)
+        stage(1, tPrep)
         // Not sent: it is shown with the cut-out of the next frame that is (1/30 s later), so the
         // video keeps every frame and the cut-out is never more than a frame away.
         // Safety net: a model that hangs must not freeze the picture.
@@ -839,6 +902,7 @@ class CompositeEngine(context: Context) {
                     if (mask != null && r.gen == maskGen) reportFraming(mask, bmp, r.roi, mirroredView)
                 } catch (t: Throwable) {
                     Log.e(TAG, "segmentation failed", t)
+                    PerfLog.error("model", t)
                 } finally {
                     val m = mask
                     handler.post {
@@ -859,6 +923,8 @@ class CompositeEngine(context: Context) {
                             }
                         } catch (t: Throwable) {
                             Log.e(TAG, "frame failed", t)
+                            wErr++
+                            PerfLog.error("frame after model", t)
                         }
                         noteGlBusy(SystemClock.uptimeMillis() - t1)
                     }
@@ -881,6 +947,9 @@ class CompositeEngine(context: Context) {
 
     /** Runs on the segmentation thread. */
     private fun noteSegmentationTime(ms: Long) {
+        wSegN.incrementAndGet()
+        wSegSum.addAndGet(ms)
+        if (ms > wSegMax.get()) wSegMax.set(ms)
         segSamples++
         segTimeAvg = if (segSamples == 1) ms.toFloat() else segTimeAvg * 0.9f + ms * 0.1f
         if (segSamples > 30 && segTimeAvg > 90f && !slowReported) {
@@ -997,21 +1066,41 @@ class CompositeEngine(context: Context) {
         countPresented()
         slot.pending = false
         makeCurrentAny()
+        wShown++
+        var t = SystemClock.uptimeMillis()
         computeAlpha(slot)
-        maybeSnapshot(slot)
+        stage(2, t)
+        if (snapshotListener != null) {
+            t = SystemClock.uptimeMillis()
+            maybeSnapshot(slot)
+            stage(5, t)
+        }
         val recording = encoderSurface != EGL14.EGL_NO_SURFACE
         val n = previewEveryNthWhileRecording
+        t = SystemClock.uptimeMillis()
         if (!recording || n <= 1 || ++previewCounter % n == 0L) {
             showOnScreen(slot)
         } else if (mode == MODE_BLUR || (mode == MODE_IMAGE && !bgReady)) {
             updateBlurSource(slot) // the video's blurred background still needs this frame
         }
-        if (slot.encode && encoderSurface != EGL14.EGL_NO_SURFACE) {
-            EGL14.eglMakeCurrent(display, encoderSurface, encoderSurface, eglContext)
-            val (cx, cy) = cropW()
-            render(encoderW, encoderH, scaleC(cx, cy), mode, slot.tex)
-            EGLExt.eglPresentationTimeANDROID(display, encoderSurface, slot.ptsNs)
-            EGL14.eglSwapBuffers(display, encoderSurface)
+        stage(3, t)
+        // Read again here: the recording may have been paused, or failed, since this frame came in.
+        if (slot.encode && encoderSurface != EGL14.EGL_NO_SURFACE && !recordPaused()) {
+            t = SystemClock.uptimeMillis()
+            // If the encoder stops taking frames, this call waits. The time is published so the
+            // camera screen can notice and shut the encoder down instead of freezing.
+            encoderSwapStart = t
+            try {
+                EGL14.eglMakeCurrent(display, encoderSurface, encoderSurface, eglContext)
+                val (cx, cy) = cropW()
+                render(encoderW, encoderH, scaleC(cx, cy), mode, slot.tex)
+                EGLExt.eglPresentationTimeANDROID(display, encoderSurface, slot.ptsNs)
+                if (!EGL14.eglSwapBuffers(display, encoderSurface)) wFailVideo++
+            } finally {
+                encoderSwapStart = 0L
+            }
+            wEnc++
+            stage(4, t)
         }
         makeCurrentAny()
     }
@@ -1086,7 +1175,18 @@ class CompositeEngine(context: Context) {
             focusMatrix = mul(mul(mul(stMatrix.copyOf(), fixMatrix), nFromW), wFromOut)
             EGL14.eglMakeCurrent(display, previewSurface, previewSurface, eglContext)
             render(previewW, previewH, wFromOut, mode, slot.tex)
-            EGL14.eglSwapBuffers(display, previewSurface)
+            if (EGL14.eglSwapBuffers(display, previewSurface)) {
+                screenFails = 0
+            } else {
+                // The screen surface no longer takes pictures (the picture would stay frozen).
+                // After a few failures, let go of it and ask for it to be set up again.
+                wFailScreen++
+                if (++screenFails >= 15) {
+                    screenFails = 0
+                    destroyPreview()
+                    ContextCompat.getMainExecutor(appContext).execute { onPreviewLost?.invoke() }
+                }
+            }
         }
         makeCurrentAny()
     }
