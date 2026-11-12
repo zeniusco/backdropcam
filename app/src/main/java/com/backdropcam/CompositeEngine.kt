@@ -229,6 +229,9 @@ class CompositeEngine(context: Context) {
     /** Set true to keep segmenting (for framing guidance) even with no background effect. */
     @Volatile var framingWanted = false
 
+    /** The framing analysis (a few times a second) only runs while this is true. */
+    @Volatile var framingEnabled = false
+
     /** Main-thread callback with where the person is in the frame. */
     var onFraming: ((Framing) -> Unit)? = null
     private var lastFramingMs = 0L
@@ -981,6 +984,7 @@ class CompositeEngine(context: Context) {
     /** Runs on the segmentation thread. Converts the crop's mask into whole-picture framing. */
     private fun reportFraming(mask: PersonSegmenter.Mask, frame: Bitmap, roi: FloatArray, mirrored: Boolean) {
         val cb = onFraming ?: return
+        if (!framingEnabled) return
         val now = SystemClock.uptimeMillis()
         if (now - lastFramingMs < 150) return
         lastFramingMs = now
@@ -1629,10 +1633,13 @@ float rawAlpha(vec2 p, vec3 cam) {
     if (uHasMask > 0.5) {
         m0 = maskAt(p);
         vec2 r = uMaskTexel * 1.8;
-        float lo = min(m0, min(min(maskAt(p + vec2(r.x, r.y)), maskAt(p - vec2(r.x, r.y))),
-                               min(maskAt(p + vec2(r.x, -r.y)), maskAt(p - vec2(r.x, -r.y)))));
-        float hi = max(m0, max(max(maskAt(p + vec2(r.x, r.y)), maskAt(p - vec2(r.x, r.y))),
-                               max(maskAt(p + vec2(r.x, -r.y)), maskAt(p - vec2(r.x, -r.y)))));
+        // Each neighbour is looked up once (same result as before, half the lookups).
+        float n1 = maskAt(p + vec2(r.x, r.y));
+        float n2 = maskAt(p - vec2(r.x, r.y));
+        float n3 = maskAt(p + vec2(r.x, -r.y));
+        float n4 = maskAt(p - vec2(r.x, -r.y));
+        float lo = min(m0, min(min(n1, n2), min(n3, n4)));
+        float hi = max(m0, max(max(n1, n2), max(n3, n4)));
         nearEdge = lo < 0.97 && hi > 0.03;
     }
     if (uHasMask > 0.5) {

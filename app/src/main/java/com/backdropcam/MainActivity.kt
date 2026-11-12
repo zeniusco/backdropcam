@@ -1155,6 +1155,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun applyBackdropSelection() {
         highlightSelection()
+        updateFramingNeed()
         when (val key = settings.backdrop) {
             KEY_NONE -> engine.setMode(CompositeEngine.MODE_NONE)
             KEY_BLUR -> engine.setMode(CompositeEngine.MODE_BLUR)
@@ -1267,7 +1268,13 @@ class MainActivity : AppCompatActivity() {
         return if (n > 0) "+$n" else "$n"
     }
 
+    /** The "where are you in the picture" analysis only runs while something uses its result. */
+    private fun updateFramingNeed() {
+        engine.framingEnabled = adjustOpen || (hasBackdropImage() && settings.personScale < 0.99f)
+    }
+
     private fun applyPersonAndColor() {
+        updateFramingNeed()
         engine.setPersonTransform(settings.personScale, settings.personOffX, settings.personOffY)
         engine.setColorAdjust(2f.pow(settings.brightness), 0f)
     }
@@ -1275,6 +1282,7 @@ class MainActivity : AppCompatActivity() {
     /** The adjust panel replaces the lens switch and backdrop strip while open, to save space. */
     private fun setAdjustOpen(open: Boolean) {
         adjustOpen = open
+        updateFramingNeed()
         ui.adjustPanel.visibility = if (open) View.VISIBLE else View.GONE
         ui.stripScroll.visibility = if (open) View.GONE else View.VISIBLE
         updateLensRowVisibility()
@@ -1416,6 +1424,7 @@ class MainActivity : AppCompatActivity() {
         micMonitor?.stop()
         micMonitor = null
         micMuted = false
+        var created: VideoRecorder? = null
         try {
             val rec = VideoRecorder(
                 this, size.width, size.height, audio,
@@ -1430,11 +1439,16 @@ class MainActivity : AppCompatActivity() {
                 voiceIsolation = settings.voiceIsolation,
                 personName = settings.personName,
             )
+            created = rec
             rec.start()
             engine.startRecording(rec.inputSurface, size.width, size.height, rotation, { rec.ptsNs() }, { rec.paused || rec.problem != null })
             recorder = rec
             PerfLog.add("recording started ${size.width}x${size.height} ${rec.videoMime}")
         } catch (e: Exception) {
+            // Give back what the failed start took (video encoder, microphone, the empty file).
+            // Left behind, they would make every later recording slower or silent.
+            PerfLog.error("start recording", e)
+            created?.let { failed -> engine.stopRecording { io.execute { runCatching { failed.finish() } } } }
             setShutter(false)
             return hint("Cannot start recording: ${e.message}")
         }
@@ -2232,13 +2246,14 @@ class MainActivity : AppCompatActivity() {
 
     private fun loadThumbInto(uri: Uri, target: ImageView, forgetIfMissing: Boolean = false) {
         io.execute {
+            val r = MediaMetadataRetriever()
             val bmp: Bitmap? = try {
-                MediaMetadataRetriever().run {
-                    setDataSource(this@MainActivity, uri)
-                    frameAt(this, 0L, 320).also { release() }
-                }
+                r.setDataSource(this@MainActivity, uri)
+                frameAt(r, 0L, 320)
             } catch (e: Exception) {
                 null
+            } finally {
+                runCatching { r.release() }
             }
             main.post {
                 when {

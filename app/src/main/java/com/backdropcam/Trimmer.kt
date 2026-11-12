@@ -25,15 +25,16 @@ import java.util.concurrent.TimeUnit
  */
 object Trimmer {
 
-    fun durationUs(context: Context, uri: Uri): Long = try {
-        MediaMetadataRetriever().run {
-            setDataSource(context, uri)
-            val ms = extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-            release()
-            ms * 1000
+    fun durationUs(context: Context, uri: Uri): Long {
+        val r = MediaMetadataRetriever()
+        return try {
+            r.setDataSource(context, uri)
+            (r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L) * 1000
+        } catch (e: Exception) {
+            0L
+        } finally {
+            runCatching { r.release() }
         }
-    } catch (e: Exception) {
-        0L
     }
 
     /** Writes [startUs]..[endUs] of [src] as a new gallery video and returns its URI. */

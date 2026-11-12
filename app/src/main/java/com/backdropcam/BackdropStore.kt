@@ -71,17 +71,20 @@ class BackdropStore(private val context: Context) {
         if (isVideo(f.name)) videoFrame(f, 200) else ImageUtils.decode({ f.inputStream() }, 200)
 
     /** First frame of a video backdrop, scaled to at most [maxSide]. */
-    fun videoFrame(f: File, maxSide: Int): Bitmap? = runCatching {
-        android.media.MediaMetadataRetriever().run {
-            setDataSource(f.absolutePath)
-            val frame = getFrameAtTime(0)
-            release()
-            frame?.let {
+    fun videoFrame(f: File, maxSide: Int): Bitmap? {
+        val r = android.media.MediaMetadataRetriever()
+        return try {
+            r.setDataSource(f.absolutePath)
+            r.getFrameAtTime(0)?.let {
                 val s = maxSide.toFloat() / max(it.width, it.height)
                 if (s < 1f) Bitmap.createScaledBitmap(it, (it.width * s).toInt(), (it.height * s).toInt(), true) else it
             }
+        } catch (e: Exception) {
+            null
+        } finally {
+            runCatching { r.release() }
         }
-    }.getOrNull()
+    }
 
     fun delete(name: String) {
         file(name).delete()
