@@ -1,7 +1,89 @@
 <resources>
     <style name="Theme.BackdropCam" parent="Theme.Material3.Dark.NoActionBar">
-        <item name="android:statusBarColor">@android:color/black</item>
-        <item name="android:navigationBarColor">@android:color/black</item>
+        <item name="colorPrimary">@color/accent</item>
+        <item name="colorOnPrimary">#000000</item>
+        <item name="colorSecondaryContainer">#3A3A42</item>
+        <item name="colorOnSecondaryContainer">#FFFFFF</item>
+        <item name="colorSurface">@color/sheet</item>
+        <item name="colorSurfaceContainerLow">@color/sheet</item>
         <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
     </style>
+
+    <!-- Round glass button used over the camera picture -->
+    <style name="RoundIcon">
+        <item name="android:layout_width">44dp</item>
+        <item name="android:layout_height">44dp</item>
+        <item name="android:background">@drawable/bg_circle_dark</item>
+        <item name="android:padding">11dp</item>
+        <item name="android:scaleType">fitCenter</item>
+        <item name="tint">@android:color/white</item>
+    </style>
+
+    <!-- Button inside the floating side toolbar -->
+    <style name="RailIcon">
+        <item name="android:layout_width">44dp</item>
+        <item name="android:layout_height">44dp</item>
+        <item name="android:background">?attr/selectableItemBackgroundBorderless</item>
+        <item name="android:padding">11dp</item>
+        <item name="android:scaleType">fitCenter</item>
+        <item name="tint">@android:color/white</item>
+    </style>
+
+    <!-- Square toggle in the top bar (FULL, 4K, timer). Square so it can turn with the phone. -->
+    <style name="QuickChip">
+        <item name="android:layout_width">50dp</item>
+        <item name="android:layout_height">40dp</item>
+        <item name="android:gravity">center</item>
+        <item name="android:padding">0dp</item>
+        <item name="android:background">@drawable/bg_chip</item>
+        <item name="android:textColor">@android:color/white</item>
+        <item name="android:textSize">12sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:maxLines">1</item>
+        <item name="android:drawableTint">@android:color/white</item>
+    </style>
+
+    <!-- Icon tab in the adjust panel (size / light / warmth) -->
+    <style name="AdjustTab">
+        <item name="android:layout_width">42dp</item>
+        <item name="android:layout_height">36dp</item>
+        <item name="android:background">@drawable/bg_chip</item>
+        <item name="android:paddingTop">7dp</item>
+        <item name="android:paddingBottom">7dp</item>
+        <item name="android:scaleType">fitCenter</item>
+        <item name="tint">@android:color/white</item>
+    </style>
+
+    <style name="SheetTitle">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:textSize">22sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textColor">@android:color/white</item>
+        <item name="android:layout_marginBottom">8dp</item>
+    </style>
+
+    <!-- Small accent heading that starts a group in a sheet -->
+    <style name="SheetSection">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:textSize">12sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:letterSpacing">0.08</item>
+        <item name="android:textAllCaps">true</item>
+        <item name="android:textColor">@color/accent</item>
+        <item name="android:layout_marginTop">24dp</item>
+    </style>
+
+    <style name="SheetLabel">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:textSize">14sp</item>
+        <item name="android:textColor">@color/text_secondary</item>
+        <item name="android:layout_marginTop">12dp</item>
+    </style>
+
 </resources>

@@ -9,23 +9,42 @@
         android:maxSdkVersion="28" />
 
     <uses-feature android:name="android.hardware.camera.any" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
+
     <uses-feature android:glEsVersion="0x00030000" android:required="true" />
 
     <application
-        android:name=".BackdropApp"
-        android:allowBackup="true"
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@style/Theme.BackdropCam">
 
+        <!-- The camera screen is built for an upright phone. Android 16 otherwise ignores the
+             portrait setting on tablets and foldables, which would turn the picture sideways. -->
+        <property
+            android:name="android.window.PROPERTY_COMPAT_ALLOW_RESTRICTED_RESIZABILITY"
+            android:value="true" />
+
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTask"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
             android:screenOrientation="portrait">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Tries the cut-out on the graphics chip in its own process, so a crash there cannot
+             close the camera screen. -->
+        <service
+            android:name=".GpuProbeService"
+            android:exported="false"
+            android:process=":probe" />
     </application>
 </manifest>
